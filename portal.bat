@@ -1,21 +1,21 @@
 @echo off
 setlocal enabledelayedexpansion
 
-:: Arduino ºôµå Æú´õ ±âº» °æ·Î
-set "arduinoBuildPath=C:\Users\tyback\AppData\Local\arduino\sketches"
-set "projectPath=C:\Users\tyback\OneDrive\¹®¼­\Arduino\bin"
+:: Arduino ë¹Œë“œ í´ë” ê¸°ë³¸ ê²½ë¡œ
+set "arduinoBuildPath=C:\Users\ì‚¬ìš©ìëª…\AppData\Local\arduino\sketches"
+set "projectPath=íƒ€ê²Ÿê²½ë¡œ"
 
-:: °¡Àå ÃÖ½Å Æú´õ¸¦ Ã£±â À§ÇÑ º¯¼ö ÃÊ±âÈ­
+:: ê°€ì¥ ìµœì‹  í´ë”ë¥¼ ì°¾ê¸° ìœ„í•œ ë³€ìˆ˜ ì´ˆê¸°í™”
 set "latestFolder="
 set "latestTime=0"
 
-:: Æú´õ ¸ñ·ÏÀ» Á¶È¸ÇÏ¸ç ÃÖ½Å ³¯Â¥ÀÇ Æú´õ Ã£±â
+:: í´ë” ëª©ë¡ì„ ì¡°íšŒí•˜ë©° ìµœì‹  ë‚ ì§œì˜ í´ë” ì°¾ê¸°
 for /d %%F in ("%arduinoBuildPath%\*") do (
     for %%G in ("%%F") do (
         set "folderTime=%%~tG"
         set "folderName=%%F"
 
-        :: Æú´õÀÇ ¸¶Áö¸· ¼öÁ¤ ½Ã°£ÀÌ °¡Àå ÃÖ½ÅÀÎÁö È®ÀÎ
+        :: í´ë”ì˜ ë§ˆì§€ë§‰ ìˆ˜ì • ì‹œê°„ì´ ê°€ì¥ ìµœì‹ ì¸ì§€ í™•ì¸
         if !folderTime! GTR !latestTime! (
             set "latestTime=!folderTime!"
             set "latestFolder=!folderName!"
@@ -23,13 +23,13 @@ for /d %%F in ("%arduinoBuildPath%\*") do (
     )
 )
 
-:: ÃÖ½Å Æú´õ¿¡¼­ ¹ÙÀÌ³Ê¸® ÆÄÀÏ º¹»ç
+:: ìµœì‹  í´ë”ì—ì„œ ë°”ì´ë„ˆë¦¬ íŒŒì¼ ë³µì‚¬
 if not "!latestFolder!"=="" (
-    echo ?? °¡Àå ÃÖ±Ù »ı¼ºµÈ Æú´õ: !latestFolder!
+    echo ?? ê°€ì¥ ìµœê·¼ ìƒì„±ëœ í´ë”: !latestFolder!
     copy /Y "!latestFolder!\*.bin" "%projectPath%\"
-    echo ? ÃÖ½Å ¹ÙÀÌ³Ê¸® ÆÄÀÏÀÌ ÇÁ·ÎÁ§Æ® Æú´õ·Î ÀÌµ¿ ¿Ï·á!
+    echo ? ìµœì‹  ë°”ì´ë„ˆë¦¬ íŒŒì¼ì´ í”„ë¡œì íŠ¸ í´ë”ë¡œ ì´ë™ ì™„ë£Œ!
 ) else (
-    echo ? ÃÖ½Å Æú´õ¸¦ Ã£À» ¼ö ¾ø½À´Ï´Ù. ÄÄÆÄÀÏÀ» ¸ÕÀú ½ÇÇàÇÏ¼¼¿ä.
+    echo ? ìµœì‹  í´ë”ë¥¼ ì°¾ì„ ìˆ˜ ì—†ìŠµë‹ˆë‹¤. ì»´íŒŒì¼ì„ ë¨¼ì € ì‹¤í–‰í•˜ì„¸ìš”.
 )
 
 pause
