@@ -26,8 +26,8 @@ unsigned long btnBPressStart = 0;     // 버튼 B가 눌린 시작 시간
 bool bLongPressTriggered = false;     // 버튼 B가 길게 눌렸는지 여부
 
 // FFT 설정===================================================================
-#define SAMPLES             512     // FFT 분석을 위한 샘플 개수 (2의 제곱수)
-#define SAMPLING_FREQUENCY  700     // 샘플링 주파수 (Hz), 마이크에서 데이터를 읽어오는 속도
+#define SAMPLES             128     // FFT 분석을 위한 샘플 개수 (2의 제곱수)
+#define SAMPLING_FREQUENCY  2410     // 샘플링 주파수 (Hz), 마이크에서 데이터를 읽어오는 속도
 
 // FFT 및 마이크 처리 관련 변수
 float vReal[SAMPLES];               // 실수부 데이터를 저장할 배열
@@ -35,11 +35,6 @@ float vImag[SAMPLES];               // 허수부 데이터를 저장할 배열 (
 int16_t micBuffer[SAMPLES];         // 마이크로부터 읽어온 데이터를 저장할 버퍼
 ArduinoFFT<float> FFT = ArduinoFFT<float>(); // FFT 객체 생성
 
-/*
-note (날짜, 전압, 모터, 샘플/샘플링, 엠파스/스피드체커)
-4-28 2.8V Rev 512/700 26.3/25.58 // fe
-
-*/
 
 //=============================================================================
 // 모드 번호 정의 (0~3)
@@ -58,6 +53,10 @@ float gearRatios[] = {3.7, 3.5};     // 기어비 옵션
 int numGearRatios = sizeof(gearRatios) / sizeof(gearRatios[0]); // 기어비 옵션 개수
 int currentGearIndex = 0;           // 현재 선택된 기어비 인덱스
 uint16_t gearColors[] = {GREEN, CYAN}; // 기어비에 따른 색상
+
+#define AVG_WINDOW_SIZE 8 // 이동평균 필터
+float frequencyBuffer[AVG_WINDOW_SIZE];
+int bufferIndex = 0;
 
 // [모드 1] 스톱워치 모드 관련 변수 =============================================
 bool stopwatchRunning = false;      // 스톱워치가 실행 중인지 여부
@@ -222,7 +221,17 @@ void loop(){
             FFT.complexToMagnitude(vReal, vImag, SAMPLES);
             // 복소수 결과를 크기로 변환
             float currentFrequency = FFT.majorPeak(vReal, SAMPLES, SAMPLING_FREQUENCY);
-            // 가장 큰 주파수 성분 추출
+            float currentFrequencyRaw = currentFrequency; // currentFrequency 값을 currentFrequencyRaw에 할당
+             // --- 이동 평균 필터 코드 ---
+            frequencyBuffer[bufferIndex] = currentFrequencyRaw;
+            bufferIndex = (bufferIndex + 1) % AVG_WINDOW_SIZE;
+
+            float currentFrequencyFiltered = 0;
+                for (int i = 0; i < AVG_WINDOW_SIZE; i++) {
+                    currentFrequencyFiltered += frequencyBuffer[i];
+                }
+            currentFrequencyFiltered /= AVG_WINDOW_SIZE;
+            // --- 이동 평균 필터 코드 끝 ---
             if(currentFrequency < 20)
                 currentFrequency = 0;       // 노이즈로 인한 낮은 주파수 값은 0으로 처리
             int rpmCurrent = (int)round(currentFrequency * 60);
