@@ -435,22 +435,14 @@ void loop(){
             sprite.setTextSize(2);
             float batteryPct = getBatteryPercent();
             int roundedBattery = round(batteryPct); // 배터리 잔량 반올림
-            sprite.fillRect(sprite.width()-144, 7, 135, 20, BLACK); // 해당 영역을 검은색으로 채워 지움
-            sprite.setTextSize(2);
-            sprite.setTextColor(YELLOW);
-            sprite.setCursor(sprite.width()-143, 7);
+            sprite.fillRect(sprite.width()-132, 7, 135, 20, BLACK); // 해당 영역을 검은색으로 채워 지움
+            sprite.setTextSize(1.9);
+            sprite.setTextColor(batColor);
+            sprite.setCursor(sprite.width()-75, 7);
             sprite.print(M5.Power.getBatteryVoltage());
             sprite.setTextColor(WHITE);
-            sprite.setCursor(sprite.width()-93, 7);
+            sprite.setCursor(sprite.width()-26, 7);
             sprite.print("mV");
-            char formattedBattery[10];
-            sprintf(formattedBattery, "%3d%", roundedBattery); // 배터리 잔량 문자열 포맷팅
-            sprite.setTextColor(batColor);
-            sprite.setCursor(sprite.width()-58, 7);
-            sprite.print(formattedBattery);
-            sprite.setCursor(sprite.width()-20, 7);
-            sprite.setTextColor(WHITE);
-            sprite.print("%");
 
             // 배터리 잔량 10% 이하 도달시 LED 점등 (이미 상단에서 처리됨)
 
@@ -708,6 +700,30 @@ void loop(){
             int centerX = sprite.width() / 2;
             sprite.drawString(timeStr, centerX, posY); // 시간 출력
         }
+
+        // 배터리 잔량 텍스트 (우측 상단)
+        float batPct = getBatteryPercent(); // 현재 배터리 잔량 백분율 계산
+        uint16_t batColor = GREEN;      // 기본 배터리 색상을 녹색으로 설정
+        if(batPct <= 10.0){             // 배터리 잔량이 10% 이하인 경우
+            if(millis() % 2000 < 1000)   // 2초마다 1초씩
+                batColor = RED;         // 빨간색으로 변경
+            else
+                batColor = BLACK;       // 검은색으로 변경 (깜빡임 효과)
+        }
+          
+        sprite.setTextSize(2);
+        float batteryPct = getBatteryPercent();
+        int roundedBattery = round(batteryPct); // 배터리 잔량 반올림
+        sprite.fillRect(sprite.width()-132, 7, 135, 20, BLACK); // 해당 영역을 검은색으로 채워 지움
+        char formattedBattery[10];
+        sprintf(formattedBattery, "%3d%", roundedBattery); // 배터리 잔량 문자열 포맷팅
+        sprite.setTextColor(batColor);
+        sprite.setCursor(sprite.width()-58, 15);
+        sprite.print(formattedBattery);
+        sprite.setCursor(sprite.width()-20, 15);
+        sprite.setTextColor(WHITE);
+        sprite.print("%");
+
         sprite.pushSprite(0, 0);
         delay(50);
         return;
