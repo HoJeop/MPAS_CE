@@ -15,6 +15,27 @@
 #define DARKGREEN   0x03E0      // 어두운 녹색
 #define DARKRED     0x7800      // 어두운 빨간색
 #define LIGHTGRAY   0xBDF7      // 밝은 회색
+#define DARKMAGENTA 0x8B008B    // 추가: 어두운 자주색
+#define DARKORANGE  0xFF8C00    // 추가: 어두운 주황색
+
+struct Motor {
+  const char* name;
+  int frequency;
+  uint16_t color;
+};
+Motor motors[] = {
+  {"F130",   400, WHITE},
+  {"Rev",    430, BLUE},
+  {"Torque", 420, ORANGE},
+  {"Atomic", 420, DARKGRAY},
+  {"Light",  470, YELLOW},
+  {"Hyper",  550, RED},
+  {"Power",  630, DARKGREEN},
+  {"Mach",   630, DARKRED},
+  {"Sprint", 650, LIGHTGRAY},
+  {"Ultra",  700, PURPLE}
+};
+
 
 // M5StickC Plus2의 화면을 더블 버퍼링 방식으로 사용하기 위한 스프라이트 객체
 M5Canvas sprite(&M5.Display);
@@ -114,14 +135,27 @@ const char* qrLabels[numQRs] = {    // QR 코드 레이블 (설명)
 
 // 배터리 잔량 계산 함수 ========================================================
 float getBatteryPercent() {
-    const uint32_t BAT_LOW = 3300;  // 배터리 부족 전압 (mV)
-    const uint32_t BAT_HIGH = 4190; // 배터리 완충 전압 (mV)
+    const uint32_t BAT_LOW = 3150;  // 배터리 부족 전압 (mV)
+    const uint32_t BAT_HIGH = 4100; // 배터리 완충 전압 (mV)
     uint32_t voltage = M5.Power.getBatteryVoltage(); // 현재 배터리 전압 읽기
     if(voltage < BAT_LOW)
         voltage = BAT_LOW;          // 최저 전압 이하로 내려가지 않도록 보정
     if(voltage > BAT_HIGH)
         voltage = BAT_HIGH;         // 최고 전압 이상으로 올라가지 않도록 보정
     return ((float)(voltage - BAT_LOW) / (BAT_HIGH - BAT_LOW)) * 100.0f; // 백분율로 변환하여 반환
+
+    // --- 배터리 잔량 스무딩 처리 ---
+    static float previousBatteryPercent = -1.0f; // 이전 배터리 잔량 (-1.0f로 초기화)
+    float currentBatteryPercent = ((float)(voltage - BAT_LOW) / (BAT_HIGH - BAT_LOW)) * 100.0f; // 백분율로 변환
+    if (previousBatteryPercent == -1.0f) {
+        previousBatteryPercent = currentBatteryPercent; // 처음 값 초기화
+    }
+    float smoothedBatteryPercent = previousBatteryPercent + (currentBatteryPercent - previousBatteryPercent) * 0.1f; // EMA 필터 
+    // (0.2는 스무딩 계수, 0~1 사이 값, 작을 수록 스무딩 효과 강화, 1은 원본값)
+    previousBatteryPercent = smoothedBatteryPercent; // 현재 값을 이전 값으로 갱신
+    return int(smoothedBatteryPercent); // 소수점 버림
+  // --- 스무딩 처리 끝 ---
+
 }
 
 // setup() 함수 ===============================================================
@@ -142,6 +176,116 @@ void setup(){
     initBuzzer();                   // 부저 초기화 (buzzer.h에 정의된 함수)
     delay(100);                     // 초기화 완료 대기
 }
+
+// 그래프 관련 시작
+// 그라데이션 색상 계산 함수
+uint16_t getGradientColor(uint16_t startColor, uint16_t endColor, float ratio) {
+    uint8_t r1 = (startColor >> 11) & 0x1F;
+    uint8_t g1 = (startColor >> 5) & 0x3F;
+    uint8_t b1 = startColor & 0x1F;
+
+    uint8_t r2 = (endColor >> 11) & 0x1F;
+    uint8_t g2 = (endColor >> 5) & 0x3F;
+    uint8_t b2 = endColor & 0x1F;
+
+    uint8_t r = r1 + (r2 - r1) * ratio;
+    uint8_t g = g1 + (g2 - g1) * ratio;
+    uint8_t b = b1 + (b2 - b1) * ratio;
+
+    return (r << 11) | (g << 5) | b;
+}
+
+// 부드러운 움직임을 위한 변수
+float previousFrequency = 0;
+float previousSpeed = 0;
+//float previousBatteryVoltage = 0;
+float smoothingFactor = 0.1; // 값이 작을수록 부드러워짐 (0 ~ 1)
+
+// 모터 기준점을 표시하는 그래프를 그리는 함수
+void drawGraph(float frequency, float speed) {
+    // 그래프 영역 설정
+    int graphX = 150;
+    int graphWidth = 100;
+    int graphHeight = 100;
+    int graphThickness = 17;
+    int graphY = 25;
+    int availableHeight = 100 - 8 - 10;
+    float graphHeightRatio = (float)graphHeight / 100.0;
+    int barSpacing = graphThickness / 3;
+    int graphRightMargin = 18;
+
+    // 최대값 설정 (주파수, 속도, 전압)
+    float maxFrequency = 1000.0;
+    float maxSpeed = 100.0;
+    float maxVoltagePercent = 100.0; // 배터리 잔량은 0~100%
+
+    // 현재 배터리 잔량 (백분율) 가져오기
+    float batteryPercent = getBatteryPercent();
+
+    // 각 값의 비율 계산
+    float freqRatio = frequency / maxFrequency;
+    float speedRatio = speed / maxSpeed;
+    float voltageRatio = batteryPercent / maxVoltagePercent;
+    if (voltageRatio < 0) voltageRatio = 0;
+    if (voltageRatio > 1) voltageRatio = 1;
+
+    // 막대 그래프 높이 계산 (사용 가능한 높이에 비례)
+    int freqHeight = (int)(freqRatio * availableHeight * graphHeightRatio);
+    int speedHeight = (int)(speedRatio * availableHeight * graphHeightRatio);
+    int voltageHeight = (int)(voltageRatio * availableHeight * graphHeightRatio);
+
+    // 막대 그래프 색상
+    uint16_t freqColorStart = CYAN;
+    uint16_t freqColorEnd = DARKCYAN;
+    uint16_t speedColorStart = ORANGE;
+    uint16_t speedColorEnd = DARKORANGE;
+    uint16_t voltageColorStart = GREEN;
+    uint16_t voltageColorEnd = DARKGREEN;
+
+    int numMotors = sizeof(motors) / sizeof(motors[0]);
+
+    // 그래프 배경 지우기
+    sprite.fillRect(graphX, graphY, graphWidth, availableHeight * graphHeightRatio, BLACK);
+
+    /*
+    주파수 막대 그래프를 먼저 표시하고 이어서 모터의 기준선을 표시
+    기준선 다음에 나머지 그래프를 표시하게 하여 나머지 두 그래프는
+    모터 주파수 기준선 위에 레이어드(덮어버림).
+    */
+
+        // 막대 그래프 그리기 (주파수)
+        for (int i = 0; i < freqHeight; i++) {
+            float ratio = (float)i / freqHeight;
+            uint16_t color = getGradientColor(freqColorStart, freqColorEnd, ratio);
+            sprite.drawFastHLine(graphX + barSpacing, graphY + (int)(availableHeight * graphHeightRatio) - i - 1, graphThickness, color);
+        }
+
+        // 모터 기준선 그리기
+        for (int i = 0; i < numMotors; i++) {
+            int motorY = graphY + (int)(availableHeight * graphHeightRatio) - (int)((float)motors[i].frequency / maxFrequency * availableHeight * graphHeightRatio);
+            if (motorY >= graphY && motorY <= graphY + (int)(availableHeight * graphHeightRatio)) { // 그래프 영역 내에 있는 경우만 그림
+                sprite.drawFastHLine(graphX, motorY, graphWidth - graphRightMargin, motors[i].color);
+            }
+
+        // 막대 그래프 그리기 (속도) - 기준선 위
+        for (int i = 0; i < speedHeight; i++) {
+            float ratio = (float)i / speedHeight;
+            uint16_t color = getGradientColor(speedColorStart, speedColorEnd, ratio);
+            int startY = graphY + (int)(availableHeight * graphHeightRatio) - i - 1;
+            sprite.drawFastHLine(graphX + barSpacing * 3 + graphThickness, startY, graphThickness, color);
+        }
+
+        // 막대 그래프 그리기 (전압)
+        for (int i = 0; i < voltageHeight; i++) {
+            float ratio = (float)i / voltageHeight;
+            uint16_t color = getGradientColor(voltageColorStart, voltageColorEnd, ratio);
+            int startY = graphY + (int)(availableHeight * graphHeightRatio) - i - 1;
+            sprite.drawFastHLine(graphX + barSpacing * 5 + graphThickness * 2, startY, graphThickness, color);
+        }
+    }
+}
+
+//그래프 관련 끝
 
 // loop() 함수 ================================================================
 void loop(){
@@ -228,8 +372,8 @@ void loop(){
             longPressTriggered = false;
         }
         // 센서 데이터 처리 (마이크 FFT 측정)
-         float currentFrequencyRaw = 0.0; // 추가: currentFrequencyRaw 초기화
-        float currentFrequency = 0.0;     // 추가: currentFrequency 선언 및 초기화
+         float currentFrequencyRaw = 0.0; // currentFrequencyRaw 초기화
+        float currentFrequency = 0.0;     // currentFrequency 선언 및 초기화
         if(M5.Mic.record(micBuffer, SAMPLES, SAMPLING_FREQUENCY)){ // 마이크로부터 데이터를 읽어왔다면
             for(int i = 0; i < SAMPLES; i++){
                 vReal[i] = (float)micBuffer[i]; // 읽어온 마이크 데이터를 실수부 배열에 저장
@@ -272,10 +416,10 @@ void loop(){
             // 휠 사이즈 출력 (좌측 상단)
             sprite.fillRect(10, 5, 90, 15, BLACK); // 해당 영역을 검은색으로 채워 지움
             sprite.setTextSize(2);
-            sprite.setCursor(10,5);
+            sprite.setCursor(10,7);
             sprite.setTextColor(gearColors[currentGearIndex]); // 현재 기어비에 해당하는 색상으로 설정
             sprite.print(wheelSizes[currentWheelIndex], 1); // 휠 크기 출력 (소수점 1자리)
-            sprite.setCursor(60,5);
+            sprite.setCursor(60,7);
             sprite.setTextColor(WHITE);
             sprite.print("mm");
 
@@ -291,49 +435,56 @@ void loop(){
             sprite.setTextSize(2);
             float batteryPct = getBatteryPercent();
             int roundedBattery = round(batteryPct); // 배터리 잔량 반올림
-            sprite.fillRect(sprite.width()-60, 5, 60, 20, BLACK); // 해당 영역을 검은색으로 채워 지움
+            sprite.fillRect(sprite.width()-144, 7, 135, 20, BLACK); // 해당 영역을 검은색으로 채워 지움
             sprite.setTextSize(2);
-            sprite.setTextColor(batColor);
-            sprite.setCursor(sprite.width()-59, 5);
+            sprite.setTextColor(YELLOW);
+            sprite.setCursor(sprite.width()-143, 7);
+            sprite.print(M5.Power.getBatteryVoltage());
+            sprite.setTextColor(WHITE);
+            sprite.setCursor(sprite.width()-93, 7);
+            sprite.print("mV");
             char formattedBattery[10];
             sprintf(formattedBattery, "%3d%", roundedBattery); // 배터리 잔량 문자열 포맷팅
+            sprite.setTextColor(batColor);
+            sprite.setCursor(sprite.width()-58, 7);
             sprite.print(formattedBattery);
-            sprite.setCursor(sprite.width()-20, 5);
+            sprite.setCursor(sprite.width()-20, 7);
             sprite.setTextColor(WHITE);
             sprite.print("%");
 
             // 배터리 잔량 10% 이하 도달시 LED 점등 (이미 상단에서 처리됨)
 
             // 현재 주파수
-            sprite.fillRect(60, 33, 180, 30, BLACK); // 해당 영역을 검은색으로 채워 지움
-            sprite.setTextSize(4);
-            sprite.setCursor(10, 33);
-            sprite.setTextColor(WHITE);
-            sprite.print("P");
+            sprite.fillRect(12, 33, 160, 33, BLACK); // 해당 영역을 검은색으로 채워 지움
+            sprite.setTextSize(3.9);
+            sprite.setCursor(12, 33);
             int currFreqInt = (int)round(currentFrequency); // 현재 주파수 반올림
-            sprite.setTextSize(3);
-            sprite.setCursor(63, 33);
             sprite.setTextColor(CYAN);
             sprite.print(currFreqInt);
             sprite.setTextColor(WHITE);
-
-            // 추정속도
-            sprite.fillRect(50, 63, 190, 25, BLACK); // 해당 영역을 검은색으로 채워 지움
-            sprite.setTextSize(2.3);
-            sprite.setCursor(63, 63);
-            sprite.setTextColor(ORANGE);
-            sprite.print(estimatedSpeed, 1); // 추정 속도 출력 (소수점 1자리)
-            sprite.setTextColor(WHITE);
-            sprite.print(" km/h");
+            sprite.setTextSize(3.3);
+            sprite.setCursor(82, 37);
+            sprite.print(" Hz");
 
             // RPM
-            sprite.fillRect(60, 88, 200, 25, BLACK); // 해당 영역을 검은색으로 채워 지움
+            sprite.fillRect(12, 69, 200, 25, BLACK); // 해당 영역을 검은색으로 채워 지움
             sprite.setTextSize(2.2);
-            sprite.setCursor(63, 88);
+            sprite.setCursor(12, 69);
             sprite.setTextColor(MAGENTA);
             sprite.print(rpmCurrent);
             sprite.setTextColor(WHITE);
-            sprite.print(" rpm");
+            sprite.setTextSize(2.2);
+            sprite.setCursor(75, 67);
+            sprite.print("  rpm");
+
+            // 추정속도
+            sprite.fillRect(12, 92, 190, 25, BLACK); // 해당 영역을 검은색으로 채워 지움
+            sprite.setTextSize(2.2);
+            sprite.setCursor(12, 92);
+            sprite.setTextColor(ORANGE);
+            sprite.print(estimatedSpeed, 1); // 추정 속도 출력 (소수점 1자리)
+            sprite.setTextColor(WHITE);
+            sprite.print("  km/h");
 
             //version 정보 (컴파일 시점의 시스템 시간에 기초)
             String dateStr = String(__DATE__).substring(4, 6); // 월 정보 추출
@@ -344,9 +495,24 @@ void loop(){
             sprite.setTextSize(1.7);
             sprite.setTextColor(DARKGRAY);
             sprite.drawCentreString(mpas_version, sprite.width()/2, 116, 1.5); // 화면 중앙 하단에 버전 정보 출력
-        }
+
+            // 그래프 그리기 (우측 영역)
+            float batteryVoltage = M5.Power.getBatteryVoltage();
+
+            // 부드러운 움직임 적용
+            currentFrequency = previousFrequency + (currentFrequency - previousFrequency) * smoothingFactor;
+            estimatedSpeed = previousSpeed + (estimatedSpeed - previousSpeed) * smoothingFactor;
+            //batteryVoltage = previousBatteryVoltage + (batteryVoltage - previousBatteryVoltage) * smoothingFactor;
+
+            drawGraph(currentFrequency, estimatedSpeed);
+
+            // 현재 값을 이전 값으로 저장
+            previousFrequency = currentFrequency;
+            previousSpeed = estimatedSpeed;
+            //previousBatteryVoltage = batteryVoltage;
+         }
         sprite.pushSprite(0, 0); // 스프라이트 내용을 실제 화면에 출력
-        delay(100);
+        delay(10);
         return;
     } //mode 0 end
 
