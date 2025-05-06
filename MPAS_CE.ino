@@ -56,6 +56,34 @@ float vImag[SAMPLES];               // 허수부 데이터를 저장할 배열 (
 int16_t micBuffer[SAMPLES];         // 마이크로부터 읽어온 데이터를 저장할 버퍼
 ArduinoFFT<float> FFT = ArduinoFFT<float>(); // FFT 객체 생성
 
+
+//=============================================================================
+// 모드 번호 정의 (0~3)
+// 0: 센서 모드 (마이크를 이용한 속도 측정)
+// 1: 스톱워치 모드
+// 2: 경과시간 시계 모드
+// 3: QR코드 순환출력 모드
+int mode = 0;                       // 현재 활성화된 모드
+int prevMode = -1;                  // 이전 모드를 저장하여 모드 전환 시 화면을 초기화하는 데 사용
+
+// [모드 0] 센서 모드 관련 변수 =================================================
+float wheelSizes[] = {24.0, 26.0, 31.0}; // 휠 크기 옵션 (단위: mm)
+int numWheelSizes = sizeof(wheelSizes) / sizeof(wheelSizes[0]); // 휠 크기 옵션 개수
+int currentWheelIndex = 0;          // 현재 선택된 휠 크기 인덱스
+float gearRatios[] = {3.7, 3.5};     // 기어비 옵션
+int numGearRatios = sizeof(gearRatios) / sizeof(gearRatios[0]); // 기어비 옵션 개수
+int currentGearIndex = 0;           // 현재 선택된 기어비 인덱스
+uint16_t gearColors[] = {GREEN, CYAN}; // 기어비에 따른 색상
+
+#define AVG_WINDOW_SIZE 10 // 이동평균 필터
+float frequencyBuffer[AVG_WINDOW_SIZE];
+int bufferIndex = 0;
+
+// 1차 저역 통과 필터 변수
+float lowPassFilteredValue = 0.0;
+float previousInputValueLPF = 0.0;
+float previousOutputValueLPF = 0.0;
+
 float findMajorPeakInFrequencyRange(float *magnitude, int samples, float sampleRate, float minFreq, float maxFreq) {
     int startIndex = round(minFreq * samples / sampleRate);
     int endIndex = round(maxFreq * samples / sampleRate);
@@ -76,27 +104,57 @@ float findMajorPeakInFrequencyRange(float *magnitude, int samples, float sampleR
     }
 }
 
-//=============================================================================
-// 모드 번호 정의 (0~3)
-// 0: 센서 모드 (마이크를 이용한 속도 측정)
-// 1: 스톱워치 모드
-// 2: 경과시간 시계 모드
-// 3: QR코드 순환출력 모드
-int mode = 0;                       // 현재 활성화된 모드
-int prevMode = -1;                  // 이전 모드를 저장하여 모드 전환 시 화면을 초기화하는 데 사용
+// 1차 저역 통과 필터 함수
+float applyLowPassFilter(float inputValue, float cutoffFrequency, float sampleRate) {
+    float RC = 1.0 / (2.0 * M_PI * cutoffFrequency);
+    float dt = 1.0 / sampleRate;
+    float alpha = dt / (RC + dt);
+    float outputValue = alpha * inputValue + (1 - alpha) * previousOutputValueLPF;
 
-// [모드 0] 센서 모드 관련 변수 =================================================
-float wheelSizes[] = {24.0, 26.0, 31.0}; // 휠 크기 옵션 (단위: mm)
-int numWheelSizes = sizeof(wheelSizes) / sizeof(wheelSizes[0]); // 휠 크기 옵션 개수
-int currentWheelIndex = 0;          // 현재 선택된 휠 크기 인덱스
-float gearRatios[] = {3.7, 3.5};     // 기어비 옵션
-int numGearRatios = sizeof(gearRatios) / sizeof(gearRatios[0]); // 기어비 옵션 개수
-int currentGearIndex = 0;           // 현재 선택된 기어비 인덱스
-uint16_t gearColors[] = {GREEN, CYAN}; // 기어비에 따른 색상
+    previousInputValueLPF = inputValue;
+    previousOutputValueLPF = outputValue;
+    return outputValue;
+}
 
-#define AVG_WINDOW_SIZE 15 // 이동평균 필터
-float frequencyBuffer[AVG_WINDOW_SIZE];
-int bufferIndex = 0;
+float calculateFrequency(){
+    float currentFrequencyRaw = 0.0; // 초기화
+    float currentFrequency = 0.0;   // 초기화
+
+    if(M5.Mic.record(micBuffer, SAMPLES, SAMPLING_FREQUENCY)){
+        for(int i = 0; i < SAMPLES; i++){
+            // 저역 통과 필터 적용
+            // 저역 통과 필터의 차단 주파수 (최저값만 프리패스, 이후값은 감쇄) 300 Hz
+            vReal[i] = applyLowPassFilter((float)micBuffer[i], 300, SAMPLING_FREQUENCY);
+            vImag[i] = 0.0;
+        }
+        FFT.windowing(vReal, SAMPLES, FFT_WIN_TYP_HAMMING, FFT_FORWARD, vReal, true);
+        FFT.compute(vReal, vImag, SAMPLES, FFT_FORWARD);
+        FFT.complexToMagnitude(vReal, vImag, SAMPLES);
+
+        // 주요 피크 찾기 (이 결과를 raw 값으로 사용)
+        currentFrequencyRaw = findMajorPeakInFrequencyRange(vReal, SAMPLES, SAMPLING_FREQUENCY, 0.0, (float)SAMPLING_FREQUENCY / 2.0); // 전체 범위에서 탐색
+
+        // --- 이동 평균 필터 코드 ---
+        frequencyBuffer[bufferIndex] = currentFrequencyRaw;
+        bufferIndex = (bufferIndex + 1) % AVG_WINDOW_SIZE;
+
+        float currentFrequencyFiltered = 0;
+        for (int i = 0; i < AVG_WINDOW_SIZE; i++) {
+            currentFrequencyFiltered += frequencyBuffer[i];
+        }
+        currentFrequencyFiltered /= AVG_WINDOW_SIZE;
+        // --- 이동 평균 필터 코드 끝 ---
+
+        currentFrequency = currentFrequencyFiltered; // 필터링된 값을 최종 주파수로 사용
+
+        if(currentFrequency < 20) {
+            currentFrequency = 0; // 노이즈 처리 (필터링 후에 적용)
+        }
+    } else {
+        currentFrequency = 0; // 마이크 데이터 읽기 실패 시 0 반환
+    }
+    return currentFrequency;
+}
 
 // [모드 1] 스톱워치 모드 관련 변수 =============================================
 bool stopwatchRunning = false;      // 스톱워치가 실행 중인지 여부
@@ -360,50 +418,20 @@ void loop(){
             // 짧게 눌렀을 경우 (< 1000ms): 기어비 변경 처리
             if (aDuration < 1000) {
                 currentGearIndex = (currentGearIndex + 1) % numGearRatios; // 다음 기어비 인덱스로 변경 (순환)
-                alertSound();               // 짧게 클릭 시 효과음 재생 (buzzer.h에 정의)
+                //alertSound();               // 짧게 클릭 시 효과음 재생 (buzzer.h에 정의)
             }
             // 1초 이상 2초 미만 눌렀다 떼면: 휠 크기 변경 처리
             else if (aDuration >= 1000 && aDuration < 2000) {
                 currentWheelIndex = (currentWheelIndex + 1) % numWheelSizes; // 다음 휠 크기 인덱스로 변경 (순환)
-                modeSound();                // 중간 길이 클릭 시 효과음 재생 (buzzer.h에 정의)
+                //modeSound();                // 중간 길이 클릭 시 효과음 재생 (buzzer.h에 정의)
             }
             // 릴리즈 후 변수 모두 재설정
             btnAPressStart = 0;
             longPressTriggered = false;
-        }
-        // 센서 데이터 처리 (마이크 FFT 측정)
-         float currentFrequencyRaw = 0.0; // currentFrequencyRaw 초기화
-        float currentFrequency = 0.0;     // currentFrequency 선언 및 초기화
-        if(M5.Mic.record(micBuffer, SAMPLES, SAMPLING_FREQUENCY)){ // 마이크로부터 데이터를 읽어왔다면
-            for(int i = 0; i < SAMPLES; i++){
-                vReal[i] = (float)micBuffer[i]; // 읽어온 마이크 데이터를 실수부 배열에 저장
-                vImag[i] = 0.0;                 // 허수부 배열은 0으로 초기화
-            }
-            FFT.windowing(vReal, SAMPLES, FFT_WIN_TYP_HAMMING, FFT_FORWARD, vReal, true);
-            // FFT 분석을 위한 윈도잉 함수 적용 (Hamming 윈도우)
-            FFT.compute(vReal, vImag, SAMPLES, FFT_FORWARD);
-            // 실제 FFT 계산 수행
-            FFT.complexToMagnitude(vReal, vImag, SAMPLES);
-            // 복소수 결과를 크기로 변환
-            float currentFrequencyRaw = currentFrequency; // currentFrequency 값을 currentFrequencyRaw에 할당
-             // 특정 주파수 범위 내에서 주요 피크 찾기
-            float minFrequency = 250.0;
-            float maxFrequency = 1000.0;
-            float currentFrequency = findMajorPeakInFrequencyRange(vReal, SAMPLES, SAMPLING_FREQUENCY, minFrequency, maxFrequency);
+          }
 
-             // --- 이동 평균 필터 코드 ---
-            frequencyBuffer[bufferIndex] = currentFrequencyRaw;
-            bufferIndex = (bufferIndex + 1) % AVG_WINDOW_SIZE;
+            float currentFrequency = calculateFrequency();
 
-            float currentFrequencyFiltered = 0;
-                for (int i = 0; i < AVG_WINDOW_SIZE; i++) {
-                    currentFrequencyFiltered += frequencyBuffer[i];
-                }
-            currentFrequencyFiltered /= AVG_WINDOW_SIZE;
-            // --- 이동 평균 필터 코드 끝 ---
-
-            if(currentFrequency < 20)
-                currentFrequency = 0;       // 노이즈로 인한 낮은 주파수 값은 0으로 처리
             int rpmCurrent = (int)round(currentFrequency * 60);
             // 추출된 주파수를 RPM (분당 회전수)으로 변환
             float currentWheelDiameter = wheelSizes[currentWheelIndex] / 1000.0;
@@ -443,8 +471,6 @@ void loop(){
             sprite.setTextColor(WHITE);
             sprite.setCursor(sprite.width()-26, 7);
             sprite.print("mV");
-
-            // 배터리 잔량 10% 이하 도달시 LED 점등 (이미 상단에서 처리됨)
 
             // 현재 주파수
             sprite.fillRect(12, 33, 160, 33, BLACK); // 해당 영역을 검은색으로 채워 지움
@@ -501,8 +527,7 @@ void loop(){
             // 현재 값을 이전 값으로 저장
             previousFrequency = currentFrequency;
             previousSpeed = estimatedSpeed;
-            //previousBatteryVoltage = batteryVoltage;
-         }
+            
         sprite.pushSprite(0, 0); // 스프라이트 내용을 실제 화면에 출력
         delay(10);
         return;
