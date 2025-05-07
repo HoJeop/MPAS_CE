@@ -17,4 +17,10 @@ void modeSound();
 // 스톱워치 클릭음 함수
 void stopwatchClickSound();
 
+// 카운트다운 비프음
+void countdownBeep(int secondsLeft);
+
+// 스타트 비프음
+void startbeep();
+
 #endif

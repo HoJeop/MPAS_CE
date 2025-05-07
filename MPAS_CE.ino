@@ -187,6 +187,12 @@ static unsigned long lastBlinkTime = 0; // 마지막 깜박임 시간
 static bool blinkState = false;         // 현재 깜박임 상태 (true: 보임, false: 숨김)
 const unsigned long blinkInterval = 300;// 깜박임 간격 (ms)
 
+bool stopwatchReadyMode = false;
+bool countdownStarted = false;
+unsigned long countdownStartTime = 0;
+const unsigned long countdownDuration = 5000;
+int lastCountdownBeep = -1; // 마지막으로 울린 비프 시간 기록
+
 // [모드 2] 경과시간 시계 관련 변수 =============================================
 unsigned long clockStartTime = 0;    // 시계 시작 시간
 bool clockPaused = false;            // 시계가 일시 정지되었는지 여부
@@ -458,12 +464,12 @@ void loop(){
 
     M5.Imu.getAccelData(&accX, &accY, &accZ);  // 가속도 센서 값 가져오기
     // 센서 데이터를 사용하여 기기의 각도 계산
-      if (accY != 0) psi = atan2(accX, accY) * 57.295;  // Yaw 각도 계산
-      // Yaw 값이 임계값을 넘으면 화면을 반전 (상하 반전)
+    if (accY != 0) psi = atan2(accX, accY) * 57.295;  // Yaw 각도 계산
+    // Yaw 값이 임계값을 넘으면 화면을 반전 (상하 반전)
       if (psi > threshold && !isUpsideDown) {
         M5.Display.setRotation(1); // 180도 회전 (상하 반전)
         isUpsideDown = true;
-      } else if (psi < -threshold && isUpsideDown) {
+          } else if (psi < -threshold && isUpsideDown) {
         M5.Display.setRotation(3); // 원래 방향으로 회전
         isUpsideDown = false;
       }
@@ -562,150 +568,187 @@ void loop(){
 
   // ────────────────────────────────────────────
   // [모드 1] 스톱워치 모드
-  if (mode == 1) {
+if (mode == 1) {
 
-    // A 버튼 입력 처리
-    if (M5.BtnA.isPressed()) {
-      if (btnAPressStart == 0)
-        btnAPressStart = millis();   // 버튼 누른 시점 기록
+  // A 버튼 입력 처리
+  if (M5.BtnA.isPressed()) {
+    if (btnAPressStart == 0)
+      btnAPressStart = millis();
 
-      // 스톱워치가 멈춘 상태에서 1초 이상 버튼을 누르면 랩 타겟 변경 방지
-      if (!stopwatchRunning && (millis() - btnAPressStart >= 1000)) {
-        splitTarget = 3;         // 랩 타겟을 항상 3개로 고정
+    if (!stopwatchRunning && (millis() - btnAPressStart >= 1000) && !stopwatchReadyMode) {
+      stopwatchReadyMode = true;
+      lastBlinkTime = millis();
+      blinkState = true;
+    }
+  }
+
+  // A 버튼 릴리즈 처리
+  if (M5.BtnA.wasReleased()) {
+    if (stopwatchReadyMode && !countdownStarted) {
+      countdownStarted = true;
+      countdownStartTime = millis();
+    } else if (!stopwatchRunning && !stopwatchReadyMode) {
+      stopwatchRunning = true;
+      stopwatchStartTime = millis();
+      stopwatchElapsed = 0;
+      lapCount = 0;
+      lastLapTime = 0;
+    } else if (stopwatchRunning) {
+      unsigned long currentTimeLocal = stopwatchElapsed + (millis() - stopwatchStartTime);
+      unsigned long lapInterval = currentTimeLocal - lastLapTime;
+
+      if (lapCount < MAX_LAPS)
+        lapTimes[lapCount] = lapInterval;
+
+      lapCount++;
+      lastLapTime = currentTimeLocal;
+
+      if (lapCount >= splitTarget) {
+        stopwatchRunning = false;
+        stopwatchElapsed = currentTimeLocal;
       }
     }
 
-    // A 버튼 릴리즈 처리
-    if (M5.BtnA.wasReleased()) {
-      // 길게 눌렀지만 스톱워치가 멈춘 상태라면 동작 중지
-      if (longPressTriggered && !stopwatchRunning) {
-        btnAPressStart = 0;
-        longPressTriggered = false;
-        return;
-      } else {
-        // 스톱워치가 정지 상태라면 시작
-        if (!stopwatchRunning) {
-          stopwatchRunning = true;
-          stopwatchStartTime = millis();
-          stopwatchElapsed = 0;
-          lapCount = 0;
-          lastLapTime = 0;
-        } else {
-          // 현재 경과 시간 계산
-          unsigned long currentTimeLocal = stopwatchElapsed + (millis() - stopwatchStartTime);
+    btnAPressStart = 0;
+    longPressTriggered = false;
+    stopwatchClickSound();
+  }
 
-          // 랩 기록 저장
-          unsigned long lapInterval = currentTimeLocal - lastLapTime;
-          if (lapCount < MAX_LAPS)
-            lapTimes[lapCount] = lapInterval;
-
-          lapCount++;
-          lastLapTime = currentTimeLocal;
-
-          // 랩 카운트가 설정된 타겟에 도달하면 자동 정지
-          if (lapCount >= splitTarget) {
-            stopwatchRunning = false;
-            stopwatchElapsed = currentTimeLocal;
-          }
-        }
-      }
-
-      // 버튼 입력 초기화
-      btnAPressStart = 0;
-      longPressTriggered = false;
-      stopwatchClickSound();       // 스톱워치 버튼 클릭 시 효과음 재생 (buzzer.h에 정의)
+  // Ready 상태 화면 처리
+  if (stopwatchReadyMode && !countdownStarted) {
+    if (millis() - lastBlinkTime >= blinkInterval) {
+      blinkState = !blinkState;
+      lastBlinkTime = millis();
     }
 
-    // 스톱워치의 현재 시간 계산 (6시간 제한 적용)
-    unsigned long currentTimeDisplay = stopwatchElapsed;
-    if (stopwatchRunning)
-      currentTimeDisplay += (millis() - stopwatchStartTime);
-    if (currentTimeDisplay > 3600000UL) // 6시간 초과 방지
-      currentTimeDisplay = 3600000UL;
-
-    // 분, 초, 센티초 계산
-    int minute = currentTimeDisplay / 60000;
-    int second = (currentTimeDisplay % 60000) / 1000;
-    int centisecond = (currentTimeDisplay % 1000) / 10;
-
-    // 시간 문자열 포맷팅
-    char timeStr[16];
-    sprintf(timeStr, "%02d : %02d . %02d", minute, second, centisecond);
-
-    // 상단 타이머 영역(높이 40픽셀)만 지워서 다시 업데이트
-    sprite.fillRect(0, 0, sprite.width(), 40, BLACK);
-
-    // 스톱워치가 정지되어 랩 타겟에 도달한 경우 타이머 숫자만 깜박임
-    if (!stopwatchRunning && lapCount >= splitTarget) {
-      if (millis() - lastBlinkTime >= blinkInterval) {
-        blinkState = !blinkState;
-        lastBlinkTime = millis();
-      }
-      uint16_t displayColor = blinkState ? WHITE : BLACK;
-
-      sprite.setTextSize(2.8);
-      for (int dx = -1; dx <= 1; dx++) {
-        for (int dy = -1; dy <= 1; dy++) {
-          sprite.setTextColor(displayColor);
-          sprite.drawCentreString(timeStr, 120 + dx, 5 + dy, 2);
-        }
-      }
-    } else {
-      // 스톱워치가 진행 중이면 일반적으로 출력
-      sprite.setTextSize(2.8);
-      for (int dx = -1; dx <= 1; dx++) {
-        for (int dy = -1; dy <= 1; dy++) {
-          sprite.setTextColor(WHITE);
-          sprite.drawCentreString(timeStr, 120 + dx, 5 + dy, 2);
-        }
-      }
-    }
-
-    // 랩 기록 출력 영역 업데이트 (타이머 아래쪽)
-    sprite.fillRect(0, 40, sprite.width(), sprite.height() - 40, BLACK);
-
-    if (lapCount > 0) {
-      int startLap = (lapCount > 5) ? lapCount - 5 : 0; // 최근 5개 랩만 표시
-      int yPos = 45;
-      char lapLabel[10], lapSplitStr[20], cumStr[20];
-
-      for (int i = startLap; i < lapCount; i++) {
-        unsigned long lapTime = lapTimes[i];
-        int lapMin = lapTime / 60000;
-        int lapSec = (lapTime % 60000) / 1000;
-        int lapCs = (lapTime % 1000) / 10;
-
-        // 누적 시간 계산
-        unsigned long cumulative = 0;
-        for (int j = 0; j <= i; j++) {
-          cumulative += lapTimes[j];
-        }
-        int cumMin = cumulative / 60000;
-        int cumSec = (cumulative % 60000) / 1000;
-        int cumCs = (cumulative % 1000) / 10;
-
-        // 랩 정보 출력
-        sprintf(lapLabel, "L%d ", i + 1);
-        sprintf(lapSplitStr, "%02d:%02d.%02d", lapMin, lapSec, lapCs);
-        sprintf(cumStr, " (%02d:%02d.%02d)", cumMin, cumSec, cumCs);
-
-        int xPos = 10;
-        sprite.setTextSize(1.7);
-        sprite.setTextColor(WHITE);
-        sprite.drawString(lapLabel, xPos, yPos);
-        xPos += sprite.textWidth(lapLabel);
-        sprite.setTextColor(CYAN);
-        sprite.drawString(lapSplitStr, xPos, yPos);
-        xPos += sprite.textWidth(lapSplitStr);
-        sprite.setTextColor(YELLOW);
-        sprite.drawString(cumStr, xPos, yPos);
-        yPos += 15;
-      }
-    }
+    sprite.fillRect(0, 0, sprite.width(), 135, BLACK);
+    sprite.setTextSize(2.5);
+    sprite.setTextColor(blinkState ? RED : BLACK);
+    sprite.drawCentreString("Ready??", 120, 50, 2);
     sprite.pushSprite(0, 0);
     delay(10);
     return;
-  }  // mode 1 end
+  }
+
+  if (countdownStarted && !stopwatchRunning) {
+  unsigned long elapsedCountdown = millis() - countdownStartTime;
+  int secondsLeft = 5 - (elapsedCountdown / 1000);
+
+  // 비프음 처리: 3초부터 1초까지 1초 간격
+  if (secondsLeft <= 3 && secondsLeft > 0 && secondsLeft != lastCountdownBeep) {
+    lastCountdownBeep = secondsLeft;
+    countdownBeep(secondsLeft);
+  }
+
+  if (secondsLeft > 0) {
+      sprite.fillRect(0, 0, sprite.width(), 40, BLACK);
+      sprite.setTextSize(2.5);
+      sprite.setTextColor(WHITE);
+      char countStr[8];
+      sprintf(countStr, "%d", secondsLeft);
+      sprite.drawCentreString(countStr, 120, 5, 2);
+      sprite.pushSprite(0, 0);
+      delay(10);
+      return;
+      } else {
+      // 카운트다운 종료 -> 스톱워치 시작
+      startbeep();
+      stopwatchRunning = true;
+      stopwatchStartTime = millis();
+      stopwatchElapsed = 0;
+      lapCount = 0;
+      lastLapTime = 0;
+
+      stopwatchReadyMode = false;
+      countdownStarted = false;
+      lastCountdownBeep = -1;  // 초기화
+      }
+    }
+
+  // 스톱워치 시간 계산
+  unsigned long currentTimeDisplay = stopwatchElapsed;
+  if (stopwatchRunning)
+    currentTimeDisplay += (millis() - stopwatchStartTime);
+  if (currentTimeDisplay > 3600000UL)
+    currentTimeDisplay = 3600000UL;
+
+  int minute = currentTimeDisplay / 60000;
+  int second = (currentTimeDisplay % 60000) / 1000;
+  int centisecond = (currentTimeDisplay % 1000) / 10;
+
+  char timeStr[16];
+  sprintf(timeStr, "%02d : %02d . %02d", minute, second, centisecond);
+
+  sprite.fillRect(0, 0, sprite.width(), 40, BLACK);
+
+  if (!stopwatchRunning && lapCount >= splitTarget) {
+    if (millis() - lastBlinkTime >= blinkInterval) {
+      blinkState = !blinkState;
+      lastBlinkTime = millis();
+    }
+    uint16_t displayColor = blinkState ? WHITE : BLACK;
+
+    sprite.setTextSize(2.8);
+    for (int dx = -1; dx <= 1; dx++) {
+      for (int dy = -1; dy <= 1; dy++) {
+        sprite.setTextColor(displayColor);
+        sprite.drawCentreString(timeStr, 120 + dx, 5 + dy, 2);
+      }
+    }
+  } else {
+    sprite.setTextSize(2.8);
+    for (int dx = -1; dx <= 1; dx++) {
+      for (int dy = -1; dy <= 1; dy++) {
+        sprite.setTextColor(WHITE);
+        sprite.drawCentreString(timeStr, 120 + dx, 5 + dy, 2);
+      }
+    }
+  }
+
+  // 랩 출력 영역
+  sprite.fillRect(0, 40, sprite.width(), sprite.height() - 40, BLACK);
+
+  if (lapCount > 0) {
+    int startLap = (lapCount > 5) ? lapCount - 5 : 0;
+    int yPos = 45;
+    char lapLabel[10], lapSplitStr[20], cumStr[20];
+
+    for (int i = startLap; i < lapCount; i++) {
+      unsigned long lapTime = lapTimes[i];
+      int lapMin = lapTime / 60000;
+      int lapSec = (lapTime % 60000) / 1000;
+      int lapCs = (lapTime % 1000) / 10;
+
+      unsigned long cumulative = 0;
+      for (int j = 0; j <= i; j++)
+        cumulative += lapTimes[j];
+
+      int cumMin = cumulative / 60000;
+      int cumSec = (cumulative % 60000) / 1000;
+      int cumCs = (cumulative % 1000) / 10;
+
+      int xPos = 10;
+      sprite.setTextSize(1.7);
+      sprite.setTextColor(WHITE);
+      sprite.drawString(lapLabel, xPos, yPos);
+      sprintf(lapLabel, "L%d ", i + 1);
+      xPos += sprite.textWidth(lapLabel);
+      sprite.setTextColor(CYAN);
+      sprintf(lapSplitStr, "%02d:%02d.%02d", lapMin, lapSec, lapCs);
+      sprite.drawString(lapSplitStr, xPos, yPos);
+      xPos += sprite.textWidth(lapSplitStr);
+      sprite.setTextColor(YELLOW);
+      sprintf(cumStr, " (%02d:%02d.%02d)", cumMin, cumSec, cumCs);
+      sprite.drawString(cumStr, xPos, yPos);
+      yPos += 15;
+    }
+  }
+
+  sprite.pushSprite(0, 0);
+  delay(10);
+  return;
+}
+
 
 
   // ────────────────────────────────────────────
@@ -786,6 +829,19 @@ void loop(){
   // [모드 3] QR모드
   if(mode == 3){
     bool qrDisplayed = false;   // QR 코드를 한 번만 출력하기 위한 플래그
+    
+    M5.Imu.getAccelData(&accX, &accY, &accZ);  // 가속도 센서 값 가져오기
+    // 센서 데이터를 사용하여 기기의 각도 계산
+    if (accY != 0) psi = atan2(accX, accY) * 57.295;  // Yaw 각도 계산
+    // Yaw 값이 임계값을 넘으면 화면을 반전 (상하 반전)
+      if (psi > threshold && !isUpsideDown) {
+        M5.Display.setRotation(1); // 180도 회전 (상하 반전)
+        isUpsideDown = true;
+          } else if (psi < -threshold && isUpsideDown) {
+        M5.Display.setRotation(3); // 원래 방향으로 회전
+        isUpsideDown = false;
+      }
+
     if (!qrDisplayed) {
       int qrSize = 100;
       int centerX = (sprite.width() - qrSize) / 2;
