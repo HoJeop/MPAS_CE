@@ -1,26 +1,42 @@
+// buzzer.h
+
 #ifndef BUZZER_H
 #define BUZZER_H
 
+// 부저 핀 정의 (본인의 핀 번호에 맞게 수정)
+#define BUZZ_PIN 2
 
-// 부저 초기화 함수
-void initBuzzer();
-
-// 클릭음 함수
+// 함수 선언 (구현은 .cpp 파일에)
+void initBuzzer(); //초기화
+void playTone(int frequency, int duration);
 void clickSound();
-
-// 경고음 함수
 void alertSound();
-
-// 모드 변경음 함수
 void modeSound();
-
-// 스톱워치 클릭음 함수
 void stopwatchClickSound();
-
-// 카운트다운 비프음
-void countdownBeep(int secondsLeft);
-
-// 스타트 비프음
-void startbeep();
+void startMeasureSound();
+void stopMeasureSound();
+void successSound();
+void successUpwardTone();
+void errorSound();
+void errorDownwardTone();
+void longErrorSound();
+void warningSound();
+void highAlertSound();
+void startReadySound();
+void endSound();
+void longEndSound();
+void mouseClickSound();
+void mouseClickSound2();
+void mouseClickSound3();
+void realMouseClickSound1();
+void realMouseClickSound2();
+void realMouseClickSound3();
+void mechanicalKeyboardClick1();
+void mechanicalKeyboardClick2();
+void mechanicalKeyboardClick3();
+void mechanicalKeyboardClick4();
+void mechanicalKeyboardClick5();
+void mechanicalKeyboardClick6();
+void countdownBeep();
 
 #endif
