@@ -149,10 +149,9 @@ float calculateFrequency()
     /*
     이 부분은 얼핏 보면 if 와 else 둘다 똑같은 일을 하고 있는 것 처럼 보이지만
     그 조건을 따져보면 반드시 필요한 코드입니다.
-    더구나 if 의 경우, 일부
     */
     //마이크로 부터 모터의 진동음을 받아 주파수를 추정하는 과정에서
-    if (currentFrequency < 38)  // 필터링까지 거친 값이 30 미만으로 잡히면
+    if (currentFrequency < 30) // 감도 // 필터링까지 거친 값이 30 미만으로 잡히면
     {
       currentFrequency = 0;  // 0 으로 처리. (= 노이즈로 간주하고 측정값으로 인정하지 않음)
     }
@@ -737,10 +736,13 @@ void loop()
       int brickY = startY;
       int currentBrickWidth = brickWidth;  // 기본 벽돌 너비
 
-      if (i >= numBricks - filledBricks)
-      {
+      // if (i >= numBricks - filledBricks) // 좌왕!!!
+      if (i < filledBricks)
+      {  //우왕!!
         // 채워진 벽돌에 그라데이션 적용
-        float gradientRatio = (float)(numBricks - 1 - i) / (filledBricks > 0 ? filledBricks : 1);
+        // float gradientRatio = (float)(numBricks - 1 - i) / (filledBricks > 0 ? filledBricks : 1);
+        // // 좌왕!!!
+        float gradientRatio = (float)i / (filledBricks > 0 ? filledBricks : 1);  // 우왕!!
         uint16_t currentColor = getGradientColor(startColor, endColor, gradientRatio);
         sprite.fillRect(brickX, brickY, currentBrickWidth, barHeight, currentColor);
       }
@@ -750,9 +752,8 @@ void loop()
         sprite.fillRect(brickX, brickY, currentBrickWidth, barHeight, BLACK);
       }
 
-      // 맨 왼쪽 블록을 항상 얇고 흰색으로 표시
-      if (i == 0)
-      {
+      //if (i == 0) // 좌왕!!! (타겟블럭-빨간색)
+      if (i == numBricks - 1) {  //우왕!!
         sprite.fillRect(brickX, brickY, thinBrickWidth, barHeight, targetColor);
       }
     }
