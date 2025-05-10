@@ -160,7 +160,7 @@
     * 각 샘플에 1차 저역 통과 필터(차단 주파수 300Hz) 적용. 
     * 해밍 윈도우 적용 후 FFT 수행 (`FFT.compute()`).
     * FFT 결과로부터 복소수를 크기로 변환 (`FFT.complexToMagnitude()`).
-    * `findMajorPeakInFrequencyRange()` 함수를 호출하여 0Hz부터 나이퀴스트 주파수($\text{SAMPLING_FREQUENCY} / 2$) 사이에서 가장 큰 크기를 갖는 주파수 피크를 탐색. 
+    * `findMajorPeakInFrequencyRange()` 함수를 호출하여 0Hz부터 나이퀴스트 주파수 사이에서 가장 큰 크기를 갖는 주파수 피크를 탐색. 
     * 찾아낸 주파수 값을 이동 평균 필터(`frequencyBuffer`, `AVG_WINDOW_SIZE`)를 통해 안정화. 
     * 최종 필터링된 주파수가 30Hz 미만이거나 마이크 데이터 수신에 실패하면 0.0을 반환.
 * **`applyLowPassFilter()`**: 
