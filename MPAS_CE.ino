@@ -4,6 +4,7 @@
 
 #include <cmath>
 
+#include "version_info.h"
 #include "buzzer.h"
 #define BUZZ_PIN 2  // 부저(Buzzer) 핀 번호 정의
 
@@ -1145,11 +1146,13 @@ void loop() {
 
     sprite.pushSprite(0, 0);
     */
-    sprite.fillScreen(BLACK);
-    sprite.setTextSize(4);
-    sprite.setCursor(12, 45);
-    sprite.print("Stuck??");
-    sprite.pushSprite(0, 0);
+      sprite.setTextSize(4);
+      sprite.setCursor(10, 20);
+      sprite.print("Stuck?");
+      sprite.setTextSize(2);
+      sprite.setCursor(10, 60);
+      displayVersionInfo();
+      sprite.pushSprite(0, 0);
 
   }  // mode 6 end
 
