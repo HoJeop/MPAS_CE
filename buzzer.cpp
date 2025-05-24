@@ -151,12 +151,9 @@ void realMouseClickSound1() {
 }
 
 void realMouseClickSound2() {
-  for (int freq = 3000; freq <= 3500; freq += 50) {
-    tone(BUZZ_PIN, freq, 1);
-  }
-  tone(BUZZ_PIN, 3500, 20);
-  delay(20);
-  noTone(BUZZ_PIN);
+    tone(BUZZ_PIN, 330, 10);  // 낮은 주파수, 짧은 시간(10ms)
+    delay(10);
+    noTone(BUZZ_PIN);
 }
 
 void realMouseClickSound3() {

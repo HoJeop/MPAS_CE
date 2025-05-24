@@ -1,12 +1,14 @@
 #include <M5StickCPlus2.h>
 #include <arduinoFFT.h>
 #include <math.h>
-
 #include <cmath>
-
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "image_display_utils.h"
 #include "version_info.h"
 #include "buzzer.h"
-#define BUZZ_PIN 2  // 부저(Buzzer) 핀 번호 정의
+#define BUZZ_PIN 2
 
 // 추가 색상 정의 (16비트 컬러) =====================================================
 #define WHITE 0xFFFF
@@ -21,9 +23,20 @@
 #define LIGHTGRAY 0xBDF7
 #define DARKMAGENTA 0x8B008B
 #define DARKORANGE 0xFF8C00
+#define BLACK 0x0000
+#define MAGENTA 0xF81F
+#define CYAN 0x07FF
+#define GREEN 0x07E0
 
 // M5StickC Plus2의 화면을 더블 버퍼링 방식으로 사용하기 위한 스프라이트 객체
 M5Canvas sprite(&M5.Display);
+
+// 화면 회전 축을 나타내는 열거형 정의
+enum RotationAxis {
+  AXIS_X,
+  AXIS_Y,
+  AXIS_Z
+};
 
 // [전역] 버튼 처리 관련 변수 ==================================================
 unsigned long btnAPressStart = 0;
@@ -33,15 +46,9 @@ bool bLongPressTriggered = false;
 
 //=============================================================================
 // 모드 번호 정의
-// 0: 센서 모드
-// 1: 특정 모터 레벨측정 모드
-// 2: 스톱워치 모드
-// 3: 경과시간 시계 모드
-// 4: 수평계 모드
-// 5: QR모드
-// 6: ?????
 int mode = 0;
-int prevMode = -1;  // 모드 전환 시 이전 모드 (텍스트 정렬 복구용)
+int prevMode = -1;       // 모드 전환 시 이전 모드 (텍스트 정렬 복구용)
+int totalmode = 8;       // 총 모드 개수
 
 // FFT 설정===================================================================
 #define SAMPLES 1024
@@ -53,13 +60,17 @@ int16_t micBuffer[SAMPLES];
 ArduinoFFT<float> FFT = ArduinoFFT<float>();
 
 // [모드 0] 센서 모드 관련 변수 =================================================
-float wheelSizes[] = { 24.0, 26.0, 31.0 };  // 단위 mm
+float wheelSizes[] = { 20, 22.5, 23.0, 23.5, 23.6, 23.8, 24.0, 24.2, 26.0, 31.0 };  // 단위 mm
 int numWheelSizes = sizeof(wheelSizes) / sizeof(wheelSizes[0]);
-int currentWheelIndex = 1;
-float gearRatios[] = { 3.7, 3.5 };
+int currentWheelIndex = 8;
+float gearRatios[] = { 5.0, 4.2, 4.0, 3.7, 3.5 };
 int numGearRatios = sizeof(gearRatios) / sizeof(gearRatios[0]);
-int currentGearIndex = 1;
-uint16_t gearColors[] = { GREEN, CYAN };
+int currentGearIndex = 4;
+uint16_t gearColors[] = { BLUE, RED, WHITE, GREEN, CYAN };
+
+// 코어 간 통신을 위한 전역 변수 및 뮤텍스
+static float g_currentFrequency = 0.0;
+SemaphoreHandle_t xFrequencyMutex;
 
 #define AVG_WINDOW_SIZE 10  // 이동평균 필터
 float frequencyBuffer[AVG_WINDOW_SIZE];
@@ -136,12 +147,8 @@ float calculateFrequency() {
 
     currentFrequency = currentFrequencyFiltered;  // 필터링된 값을 최종 주파수로 사용
 
-    /*
-    이 부분은 얼핏 보면 if 와 else 둘다 똑같은 일을 하고 있는 것 처럼 보이지만
-    그 조건을 따져보면 반드시 필요한 코드입니다.
-    */
     //마이크로 부터 모터의 진동음을 받아 주파수를 추정하는 과정에서
-    if (currentFrequency < 30)  // 감도 // 필터링까지 거친 값이 30 미만으로 잡히면
+    if (currentFrequency < 30)  // 필터링까지 거친 값이 30 미만으로 잡히면
     {
       currentFrequency = 0;  // 0 으로 처리. (= 노이즈로 간주하고 측정값으로 인정하지 않음)
     }
@@ -150,6 +157,20 @@ float calculateFrequency() {
     currentFrequency = 0;  // 0 으로 처리. (측정되지 않았으므로)
   }
   return currentFrequency;
+}
+
+// Core 0에서 실행될 FreeRTOS 태스크
+void frequencyCalculationTask(void* pvParameters) {
+  for (;;) {
+    float calculatedFreq = calculateFrequency();  // 주파수 계산 함수 호출
+
+    // 뮤텍스를 사용하여 전역 변수 안전하게 업데이트
+    if (xSemaphoreTake(xFrequencyMutex, portMAX_DELAY) == pdTRUE) {
+      g_currentFrequency = calculatedFreq;
+      xSemaphoreGive(xFrequencyMutex);
+    }
+    vTaskDelay(pdMS_TO_TICKS(50));  // 다른 태스크에 CPU 시간을 양보 (50ms 지연)
+  }
 }
 
 // 배터리 잔량 계산 함수
@@ -162,21 +183,6 @@ float getBatteryPercent() {
   if (voltage > BAT_HIGH)
     voltage = BAT_HIGH;                                                 // 최고 전압 이상으로 올라가지 않도록 보정
   return ((float)(voltage - BAT_LOW) / (BAT_HIGH - BAT_LOW)) * 100.0f;  // 백분율로 변환하여 반환
-
-  // 그래프에 넣을 배터리 수치 관련
-  // --- 배터리 잔량 스무딩 처리 ---
-  static float previousBatteryPercent = -1.0f;  // 이전 배터리 잔량 (-1.0f로 초기화)
-  float currentBatteryPercent =
-    ((float)(voltage - BAT_LOW) / (BAT_HIGH - BAT_LOW)) * 100.0f;  // 백분율로 변환
-  if (previousBatteryPercent == -1.0f) {
-    previousBatteryPercent = currentBatteryPercent;  // 처음 값 초기화
-  }
-  float smoothedBatteryPercent =
-    previousBatteryPercent + (currentBatteryPercent - previousBatteryPercent) * 0.1f;  // EMA 필터
-  // (0.2는 스무딩 계수, 0~1 사이 값, 작을 수록 스무딩 효과 강화, 1은 원본값)
-  previousBatteryPercent = smoothedBatteryPercent;  // 현재 값을 이전 값으로 갱신
-  return int(smoothedBatteryPercent);               // 소수점 버림
-  // --- 스무딩 처리 끝 ---
 }
 
 // [모드 1] 특정 모터 레벨측정 모드 관련 변수 ==================================================
@@ -185,7 +191,9 @@ struct Motor {
   int maxThreshold;
   uint16_t color;
 };
-Motor motors[] = { { "F130", 400, WHITE }, { "Rev", 430, BLUE }, { "Torque", 420, ORANGE }, { "Atomic", 420, DARKGRAY }, { "Light", 470, YELLOW }, { "Hyper", 550, RED }, { "Power", 630, DARKGREEN }, { "Mach", 630, DARKRED }, { "Sprint", 650, LIGHTGRAY }, { "Ultra", 700, PURPLE } };
+Motor motors[] = {
+  { "FA-130", 400, WHITE }, { "Rev.T", 430, BLUE }, { "Torque.T", 420, ORANGE }, { "Atomic.T", 420, DARKGRAY }, { "Light.D", 470, YELLOW }, { "Hyper.D", 550, RED }, { "Power.D", 630, DARKGREEN }, { "Mach.D", 630, DARKRED }, { "Sprint.D", 650, LIGHTGRAY }, { "Ultra.D", 700, PURPLE }
+};
 
 int numMotors = sizeof(motors) / sizeof(motors[0]);
 int currentMotorIndex = 0;
@@ -209,7 +217,7 @@ bool countdownReady = false;
 unsigned long countdownStartTime = 0;
 bool countdownInProgress = false;
 bool isCountingDown = false;
-int previousCountdownValue = -1;  // 초기값은 표시되지 않는 숫자로
+int previousCountdownValue = -1;
 
 // [모드 3] 경과시간 시계 관련 변수 =============================================
 unsigned long clockStartTime = 0;
@@ -217,6 +225,7 @@ bool clockPaused = false;
 unsigned long pausedTime = 0;
 unsigned long bootTime = 0;
 unsigned long lastDisplaySecond = 0;
+unsigned long lastUpdate = 0;
 
 // [모드 4] 각도기 모드 + 화면회전 변수 ===============================================
 // 가속도 센서 데이터 변수
@@ -253,33 +262,45 @@ const char* qrCodes[numQRs] = {
 
 const char* qrLabels[numQRs] = { "Racer's Manner", "Naver Map", "Kakao Map" };
 
+
 // setup() 함수 ===============================================================
 void setup() {
-  M5.begin();  // 버튼 함수 등 인식
-
-  M5.Display.setRotation(1);      // 화면 회전 (A 버튼이 오른쪽) "우왕!!!"
-  M5.Display.fillScreen(BLACK);   // 화면 초기화 (검은색 배경)
-  sprite.createSprite(240, 135);  // 스프라이트 생성 (디스플레이 크기: 240x135)
+  M5.begin();                     // 버튼 함수 등 인식
+  sprite.setRotation(1);          // 화면 회전 (A 버튼이 오른쪽) "우왕!!!"
+  sprite.fillScreen(BLACK);       // 화면 초기화 (검은색 배경)
+  sprite.createSprite(135, 240);  // 스프라이트 생성 (디스플레이 크기: 240x135)
+  sprite.setSwapBytes(true);      // GIMP 데이터와 일치하도록 바이트 스왑 설정
   sprite.setTextSize(5);          // 텍스트 크기 설정
   sprite.setTextColor(WHITE);     // 텍스트 색상 설정
   sprite.setTextDatum(TL_DATUM);
-
   M5.Power.begin();  // 배터리 관련 초기화
   M5.Mic.begin();    // 마이크 초기화
   M5.Imu.begin();    // 가속도 센서 초기화
   initBuzzer();      // 부저 초기화
+  Serial.begin(115200);
+  // 뮤텍스 생성
+  xFrequencyMutex = xSemaphoreCreateMutex();
+  if (xFrequencyMutex == NULL) {
+    // 뮤텍스 생성 실패 처리 (예: 시리얼 모니터에 에러 메시지 출력)
+    Serial.println("Error: Mutex creation failed!");
+  }
+
+  // 주파수 계산 태스크를 Core 0에 할당하여 생성
+  // 스택 크기는 필요에 따라 조정할 수 있습니다. (예: 8192 바이트)
+  xTaskCreatePinnedToCore(
+    frequencyCalculationTask,  // 태스크 함수
+    "FreqCalcTask",            // 태스크 이름
+    8192,                      // 스택 크기 (바이트)
+    NULL,                      // 태스크 매개변수
+    2,                         // 태스크 우선순위 (높을수록 우선순위 높음)
+    NULL,                      // 태스크 핸들 (필요 없으면 NULL)
+    0                          // 실행할 코어 번호 (Core 0)
+  );
 
   bootTime = millis();
   clockStartTime = bootTime;
 }
 
-// IMU 센서 보정값 초기화 함수
-void resetSensor() {
-  offset_psi = psi;  // 현재 Yaw(회전) 값을 기준점으로 설정
-  offset_phi = phi;  // 현재 Pitch(기울기) 값을 기준점으로 설정
-}
-
-// 그래프 관련 시작
 // 그라데이션 색상 계산 함수
 uint16_t getGradientColor(uint16_t startColor, uint16_t endColor, float ratio) {
   uint8_t r1 = (startColor >> 11) & 0x1F;
@@ -297,114 +318,40 @@ uint16_t getGradientColor(uint16_t startColor, uint16_t endColor, float ratio) {
   return (r << 11) | (g << 5) | b;
 }
 
-// 부드러운 움직임을 위한 변수
-float previousFrequency = 0;
-float previousSpeed = 0;
-float smoothingFactor = 0.1;  // 값이 작을수록 부드러워짐 (0 ~ 1)
-
-// 모터 기준점을 표시하는 그래프를 그리는 함수
-void drawGraph(float frequency, float speed) {
-  // 그래프 영역 설정
-  int graphX = 150;
-  int graphWidth = 100;
-  int graphHeight = 100;
-  int graphThickness = 17;
-  int graphY = 25;
-  int availableHeight = 100 - 8 - 10;
-  float graphHeightRatio = (float)graphHeight / 100.0;
-  int barSpacing = graphThickness / 3;
-  int graphRightMargin = 18;
-
-  // 최대값 설정 (주파수, 속도, 전압)
-  float maxFrequency = 1000.0;
-  float maxSpeed = 100.0;
-  float maxVoltagePercent = 100.0;  // 배터리 잔량은 0~100%
-
-  // 현재 배터리 잔량 (백분율) 가져오기
-  float batteryPercent = getBatteryPercent();
-
-  // 각 값의 비율 계산
-  float freqRatio = frequency / maxFrequency;
-  float speedRatio = speed / maxSpeed;
-  float voltageRatio = batteryPercent / maxVoltagePercent;
-  if (voltageRatio < 0)
-    voltageRatio = 0;
-  if (voltageRatio > 1)
-    voltageRatio = 1;
-
-  // 막대 그래프 높이 계산 (사용 가능한 높이에 비례)
-  int freqHeight = (int)(freqRatio * availableHeight * graphHeightRatio);
-  int speedHeight = (int)(speedRatio * availableHeight * graphHeightRatio);
-  int voltageHeight = (int)(voltageRatio * availableHeight * graphHeightRatio);
-
-  // 막대 그래프 색상
-  uint16_t freqColorStart = CYAN;
-  uint16_t freqColorEnd = DARKCYAN;
-  uint16_t speedColorStart = ORANGE;
-  uint16_t speedColorEnd = DARKORANGE;
-  uint16_t voltageColorStart = GREEN;
-  uint16_t voltageColorEnd = DARKGREEN;
-
-  int numMotors = sizeof(motors) / sizeof(motors[0]);
-
-  // 그래프 배경 지우기
-  sprite.fillRect(graphX, graphY, graphWidth, availableHeight * graphHeightRatio, BLACK);
-
-  /*
-  주파수 막대 그래프를 먼저 표시하고 이어서 모터의 기준선을 표시
-  기준선 다음에 나머지 그래프를 표시하게 하여 나머지 두 그래프는
-  모터 주파수 기준선 위에 레이어드(덮어버림).
-  */
-
-  // 막대 그래프 그리기 (주파수)
-  for (int i = 0; i < freqHeight; i++) {
-    float ratio = (float)i / freqHeight;
-    uint16_t color = getGradientColor(freqColorStart, freqColorEnd, ratio);
-    sprite.drawFastHLine(graphX + barSpacing,
-                         graphY + (int)(availableHeight * graphHeightRatio) - i - 1, graphThickness,
-                         color);
-  }
-
-  // 모터 기준선 그리기
-  for (int i = 0; i < numMotors; i++) {
-    int motorY =
-      graphY + (int)(availableHeight * graphHeightRatio) - (int)((float)motors[i].maxThreshold / maxFrequency * availableHeight * graphHeightRatio);
-    if (motorY >= graphY && motorY <= graphY + (int)(availableHeight * graphHeightRatio)) {  // 그래프 영역 내에 있는 경우만 그림
-      sprite.drawFastHLine(graphX, motorY, graphWidth - graphRightMargin, motors[i].color);
-    }
-
-    // 막대 그래프 그리기 (속도) - 기준선 위
-    for (int i = 0; i < speedHeight; i++) {
-      float ratio = (float)i / speedHeight;
-      uint16_t color = getGradientColor(speedColorStart, speedColorEnd, ratio);
-      int startY = graphY + (int)(availableHeight * graphHeightRatio) - i - 1;
-      sprite.drawFastHLine(graphX + barSpacing * 3 + graphThickness, startY, graphThickness, color);
-    }
-
-    // 막대 그래프 그리기 (전압)
-    for (int i = 0; i < voltageHeight; i++) {
-      float ratio = (float)i / voltageHeight;
-      uint16_t color = getGradientColor(voltageColorStart, voltageColorEnd, ratio);
-      int startY = graphY + (int)(availableHeight * graphHeightRatio) - i - 1;
-      sprite.drawFastHLine(graphX + barSpacing * 5 + graphThickness * 2, startY, graphThickness,
-                           color);
-    }
-  }
+// IMU 센서 보정값 초기화 함수
+void resetSensor() {
+  offset_psi = psi;  // 현재 Yaw(회전) 값을 기준점으로 설정
+  offset_phi = phi;  // 현재 Pitch(기울기) 값을 기준점으로 설정
 }
-// 그래프 관련 끝
 
 // 화면회전 함수
-void handleScreenRotation() {
+void handleScreenRotation(RotationAxis axis) {
   float accX, accY, accZ, psi;
   M5.Imu.getAccelData(&accX, &accY, &accZ);
-  if (accY != 0) {
-    psi = atan2(accX, accY) * 57.295;
+
+  if (axis == AXIS_Y) {
+    if (accY != 0) {
+      psi = atan2(accX, accY) * 57.295;
+    }
+  } else if (axis == AXIS_X) {
+    if (accX != 0) {
+      psi = atan2(accY, accX) * 57.295;
+    }
+  } else if (axis == AXIS_Z) { // Z축 로직 추가
+    if (accZ != 0) {
+      // accX와 accZ를 사용하여 Z축 기준의 기울기를 계산
+      // M5Stack을 앞뒤로 기울였을 때의 회전을 감지합니다.
+      psi = atan2(accX, accZ) * 57.295;
+    }
   }
+
   if (psi > threshold && !isUpsideDown) {
-    M5.Display.setRotation(1);
+    sprite.setRotation(1);
+    sprite.fillScreen(BLACK);
     isUpsideDown = true;
   } else if (psi < -threshold && isUpsideDown) {
-    M5.Display.setRotation(3);
+    sprite.setRotation(3);
+    sprite.fillScreen(BLACK);
     isUpsideDown = false;
   }
 }
@@ -412,73 +359,42 @@ void handleScreenRotation() {
 // loop() 함수 ================================================================
 void loop() {
   M5.update();
-  // Yaw 값 기반 모드 전환 (모드 0과 1 전용)
-  if (mode == 0 || mode == 1) {
-    M5.Imu.getAccelData(&accX, &accY, &accZ);
-    if (accY != 0)
-      psi = atan2(accX, accY) * 57.295;
+  M5.Imu.getAccelData(&accX, &accY, &accZ);
+  psi = atan2(accX, accY) * 57.295;
 
-    if (mode == 1 && psi > threshold) {
-      mode = 0;
-      M5.Display.setRotation(1);
-      sprite.fillScreen(BLACK);
-      delay(300);
-    } else if (mode == 0 && psi < -threshold) {
-      mode = 1;
-      M5.Display.setRotation(3);
-      sprite.fillScreen(BLACK);
-      delay(300);
-    }
-  }
-
-  // 공용 처리: 배터리 잔량 측정 및 LED 깜빡임
-  float batteryPct = getBatteryPercent();
-  if (batteryPct <= 10.0) {
-    if (millis() % 2000 < 1000)
-      M5.Power.setLed(1);
-    else
-      M5.Power.setLed(0);
-  } else {
-    M5.Power.setLed(0);
-  }
-
-  // 모드 전환 시 전체 화면 BLACK 및 기본 텍스트 정렬 복구
-  if (prevMode != mode) {
-    sprite.fillScreen(BLACK);
-    sprite.setTextDatum(TL_DATUM);
-    prevMode = mode;
-  }
-
-  // 글로벌 버튼 B 처리
+  // 글로벌 버튼 B 처리 (수정된 부분)
   if (M5.BtnB.isPressed()) {
     if (btnBPressStart == 0)
       btnBPressStart = millis();
   } else if (M5.BtnB.wasReleased()) {
     unsigned long duration = millis() - btnBPressStart;
 
-    if (duration >= 1800) {  // 2.5초 이상 길게 눌렀다 때면
+    if (duration >= 2000) {  // 2초 이상 길게 눌렀다 떼면 (스톱워치 랩 타겟 변경 또는 잠금화면 해제)
       if (mode == 2)         // 스톱워치 모드에서
       {
-        // 랩 타겟 변경
         currentLapTargetIndex = (currentLapTargetIndex + 1) % 3;
         splitTarget = allowedLapTargets[currentLapTargetIndex];
         realMouseClickSound1();
       }
-    } else if (duration >= 550 && duration < 1000)  // 0.55초 이상 1초 미만 눌렀다 때면
+    } else if (duration >= 650 && duration < 950)  // 0.8초 이상 1.5초 미만 눌렀다 떼면 (이전 모드로 이동)
     {
-      mode = (mode - 1 + 7) % 7;  // 이전모드로 단, 모드1에서는 작동안함.
+      if (mode == 2 && psi < -threshold) {
+        alertSound();
+      } else if (mode == 2 && psi > threshold) {
+        mode = 0;
+        realMouseClickSound2();
+        return;
+      } else {
+        mode = (mode - 1 + totalmode) % totalmode;  // 이전 모드로 순환
+      }
       realMouseClickSound2();
-    } else if (duration < 500)    // 짧게 누르면
+    } else if (duration < 600)  // 짧게 누르면 (다음 모드로 이동)
     {
       if (mode == 0 || mode == 1)  // 모드 0 혹은 모드 1일 경우
       {
-        mode = 2;                        // 모드 2로 전환
-      } else if (mode >= 2 && mode < 6)  // 모드 2 ~ 6 까지는
-      {
-        mode = mode + 1;     // 다음 모드로 이동
-      } else if (mode == 6)  // 모드 7 에서는
-      {
-        mode = 1;  // 모드 1로 순환 (이전 else if 와 분리해 한 번 더 확실하게 지정)
+        mode = 2;  // 모드 2로 전환
+      } else {
+        mode = (mode + 1) % totalmode;  // 다음 모드로 순환
       }
       realMouseClickSound1();
     }
@@ -486,9 +402,45 @@ void loop() {
     btnBPressStart = 0;           // 버튼 입력 플래그 초기화
     bLongPressTriggered = false;  // 길게 누름 플래그 초기화
 
-    sprite.fillScreen(BLACK);  // 모드 전환간에 화면 초기화
-    delay(150);
+    sprite.fillScreen(BLACK);  // 모드 전환 시 화면 초기화
     return;
+  }
+
+  // Yaw 값 기반 모드 전환 (센서/그래프 전환)
+  if (mode == 0 || mode == 1) {
+    if (mode == 0 && psi < -threshold) {
+      mode = 1;
+      sprite.setRotation(3);
+      sprite.fillScreen(BLACK);
+    } else if (mode == 1 && psi > threshold) {
+      mode = 0;
+      sprite.setRotation(1);
+      sprite.fillScreen(BLACK);
+    }
+  }
+
+  // 배터리 관련
+  float batteryPct = getBatteryPercent();  // 배터리 전압 퍼센트로 받아옴
+  uint16_t batColor = GREEN;               // 배터리 글자색
+  bool ledState = 0;                       // led 점등상태
+
+  if (batteryPct <= 10.0) {                       // 전압이 10% 이하일 경우
+    ledState = (millis() % 2000 < 1000) ? 1 : 0;  // LED 점등상태는 1과 0을 반복
+    batColor = ledState ? RED : BLACK;            // LED 점등 여부에 따라 배터리 색깔 변경
+  }
+
+  M5.Power.setLed(ledState);  // 위의 조건에 따라 LED를 켜고 끈다.
+
+  // 배터리 잔량 텍스트 포멧화
+  int roundedBattery = round(batteryPct);
+  char formattedBattery[10];
+  sprintf(formattedBattery, "%3d", roundedBattery);
+
+  // 모드 전환 시 전체 화면 BLACK 및 기본 텍스트 정렬 복구
+  if (prevMode != mode) {
+    sprite.fillScreen(BLACK);
+    sprite.setTextDatum(TL_DATUM);
+    prevMode = mode;
   }
 
   // ─────────────────
@@ -510,7 +462,7 @@ void loop() {
       {
         currentGearIndex =
           (currentGearIndex + 1) % numGearRatios;       // 다음 기어비 인덱스로 변경 (순환)
-      } else if (aDuration >= 800 && aDuration < 1500)  // 0.8초 이상 1.5초 미만 눌렀다 떼면
+      } else if (aDuration >= 800 && aDuration < 1500)  // 1초 이상 2초 미만 눌렀다 떼면
       {
         currentWheelIndex =
           (currentWheelIndex + 1) % numWheelSizes;  // 다음 휠 크기 인덱스로 변경 (순환)
@@ -520,8 +472,12 @@ void loop() {
       longPressTriggered = false;  // 길게 누름 플래그 초기화
     }
 
-    //현재 주파수 값은 위에서 미리 계산한 주파수 값으로 한다.
-    float currentFrequency = calculateFrequency();
+    // Core 0에서 계산된 주파수 값 가져오기
+    float currentFrequency = 0.0;
+    if (xSemaphoreTake(xFrequencyMutex, portMAX_DELAY) == pdTRUE) {
+      currentFrequency = g_currentFrequency;
+      xSemaphoreGive(xFrequencyMutex);
+    }
 
     int rpmCurrent =
       (int)round(currentFrequency * 60);  // 추출된 주파수를 RPM (분당 회전수)으로 변환
@@ -534,53 +490,85 @@ void loop() {
     float estimatedSpeed =
       (rpmCurrent / selectedGear) * (PI * currentWheelDiameter * 0.06);  // 추정 속도를 계산한다. (RPM / 기어비 * 휠 둘레 * 단위 변환 계수)
 
-    // 휠 사이즈 출력 (좌측 상단)
-    sprite.fillRect(10, 5, 90, 15, BLACK);  // 휠 숫자 영역만 검은색으로 채워 초기화
-    sprite.setTextSize(2);
-    sprite.setCursor(10, 7);
-    sprite.setTextColor(gearColors[currentGearIndex]);  // 현재 기어비에 해당하는 색상으로 설정
-    sprite.print(wheelSizes[currentWheelIndex], 1);     // 휠 크기 출력 (소수점 1자리)
-    sprite.setCursor(60, 7);
-    sprite.setTextColor(WHITE);
-    sprite.print("mm");
+    //좌측상단 경과시간
+    static unsigned long clockStartTime = 0;
+    static unsigned long pausedTime = 0;
+    static bool clockPaused = false;
+    static int lastDisplaySecond = -1;
+    static char lastTimeStr[9] = "";  // 이전 출력 문자열 캐싱
 
-    // 배터리 잔량 텍스트 (우측 상단)
-    float batPct = getBatteryPercent();
-    uint16_t batColor = GREEN;
-    if (batPct <= 10.0) {
-      batColor = (millis() % 2000 < 1000) ? RED : BLACK;
+    unsigned long elapsed = clockPaused ? pausedTime : (millis() - clockStartTime);
+    unsigned int hours = elapsed / 3600000UL;
+    unsigned int minutes = (elapsed % 3600000UL) / 60000;
+    unsigned int seconds = (elapsed % 60000UL) / 1000;
+
+    char timeStr[9];
+    sprintf(timeStr, "%02u:%02u:%02u", hours, minutes, seconds);
+
+    // 초가 바뀔 때만 텍스트 업데이트
+    if (seconds != lastDisplaySecond) {
+      lastDisplaySecond = seconds;
+      //시간 표시
+      if (strcmp(timeStr, lastTimeStr) != 0) {
+        strcpy(lastTimeStr, timeStr);
+        sprite.setTextSize(2);
+        sprite.setTextColor(YELLOW, BLACK);  // 배경 지정으로 자동 덮어쓰기
+        sprite.setTextDatum(TL_DATUM);
+        sprite.drawString(timeStr, 12, 9);
+      }
     }
 
-    int roundedBattery = round(batPct);
-    char formattedBattery[10];
-    sprintf(formattedBattery, "%3d", roundedBattery);
-
+    // 배터리 잔량 표시 (우측 상단)
     sprite.setTextSize(2);
     sprite.setTextColor(batColor, BLACK);
-    sprite.setCursor(sprite.width() - 56, 7);
-    sprite.print(formattedBattery);
+    sprite.setCursor(sprite.width() - 56, 9);
+    sprite.print(formattedBattery);  // 루프 내부 상단에 미리 정의한 포맷화된 수치
     //sprite.print(M5.Power.getBatteryVoltage());
     sprite.setTextColor(WHITE, BLACK);
-    sprite.setCursor(sprite.width() - 19, 7);
+    sprite.setCursor(sprite.width() - 19, 9);
     sprite.print("%");
 
     // 현재 주파수
-    sprite.fillRect(12, 33, 160, 33, BLACK);  // 해당 영역을 검은색으로 채워 지움
+    sprite.fillRect(12, 33, 100, 33, BLACK);  // 해당 영역을 검은색으로 채워 지움
+    //sprite.fillRect(12, 33, 100, 33, WHITE);
     sprite.setTextSize(3.9);
     sprite.setCursor(12, 33);
     int currFreqInt = (int)round(currentFrequency);  // 현재 주파수 반올림
     sprite.setTextColor(CYAN);
+    //sprite.print("256");
     sprite.print(currFreqInt);
     sprite.setTextColor(WHITE);
     sprite.setTextSize(3.3);
     sprite.setCursor(82, 37);
     sprite.print(" Hz");
 
+    // 휠 사이즈 출력
+    sprite.fillRect(156, 35, 90, 18, BLACK);  // 휠 숫자 영역만 검은색으로 채워 초기화
+    sprite.setTextSize(2.1);
+    sprite.setCursor(156, 35);
+    sprite.setTextColor(DARKGREEN);
+    sprite.print(wheelSizes[currentWheelIndex], 1);  // 휠 크기 출력 (소수점 1자리)
+    sprite.setTextSize(1.8);
+    sprite.setCursor(209, 37);
+    sprite.print("mm");
+
+    sprite.setTextColor(LIGHTGRAY);
+    sprite.setTextSize(2.1);
+    sprite.setCursor(157, 57);
+    sprite.print("Ratios");
+    sprite.fillRect(160, 80, 75, 33, BLACK);
+    sprite.setTextSize(3.9);
+    sprite.setCursor(160, 80);
+    sprite.setTextColor(gearColors[currentGearIndex]);  // 현재 기어비에 해당하는 색상으로 설정
+    sprite.print(gearRatios[currentGearIndex], 1);
+
     // RPM
-    sprite.fillRect(12, 69, 200, 25, BLACK);
+    sprite.fillRect(13, 69, 100, 25, BLACK);
+    //sprite.fillRect(13, 69, 100, 25, RED);
     sprite.setTextSize(2.2);
-    sprite.setCursor(12, 69);
+    sprite.setCursor(13, 69);
     sprite.setTextColor(MAGENTA);
+    //sprite.print("600000");
     sprite.print(rpmCurrent);
     sprite.setTextColor(WHITE);
     sprite.setTextSize(2.2);
@@ -588,42 +576,22 @@ void loop() {
     sprite.print("  rpm");
 
     // 추정속도
-    sprite.fillRect(12, 92, 190, 25, BLACK);
+    sprite.fillRect(13, 92, 100, 25, BLACK);
+    //sprite.fillRect(13, 92, 100, 25, YELLOW);
     sprite.setTextSize(2.2);
-    sprite.setCursor(12, 92);
+    sprite.setCursor(13, 92);
     sprite.setTextColor(ORANGE);
+    //sprite.print("100.0");
     sprite.print(estimatedSpeed, 1);  // 추정 속도 출력 (소수점 1자리)
+    sprite.setCursor(62, 92);
     sprite.setTextColor(WHITE);
     sprite.print("  km/h");
 
-    // version 정보 (컴파일 시점의 시스템 시간에 기초)
-    String dateStr = String(__DATE__).substring(4, 6);          // 월 정보 추출
-    String timeStr = String(__TIME__).substring(0, 2) +         // 시
-                     String(__TIME__).substring(3, 5) +         // 분
-                     String(__TIME__).substring(6, 8);          // 초
-    String mpas_version = "MPAS-CE-v0.1_" + dateStr + timeStr;  // 버전 문자열 생성
-    sprite.setTextSize(1.7);
-    sprite.setTextColor(DARKGRAY);
-    sprite.drawCentreString(mpas_version, sprite.width() / 2, 116,
-                            1.5);  // 화면 중앙 하단에 버전 정보 출력
-
-    // 그래프 그리기 (우측 영역)
-    float batteryVoltage = M5.Power.getBatteryVoltage();
-
-    // 부드러운 움직임 적용
-    // 이전 값에 "현재 값과 이전값의 차" 에 스무딩을 적용한 값 만큼 더해 끊어짐 덜하게
-    currentFrequency = previousFrequency + (currentFrequency - previousFrequency) * smoothingFactor;
-    estimatedSpeed = previousSpeed + (estimatedSpeed - previousSpeed) * smoothingFactor;
-
-    drawGraph(currentFrequency, estimatedSpeed);
-
-    // 현재 값을 이전 값으로 옮겨 저장
-    previousFrequency = currentFrequency;
-    previousSpeed = estimatedSpeed;
+    sprite.setCursor(5, 120);
+    displayBuildInfo();
 
     sprite.pushSprite(0, 0);  // 스프라이트 내용을 실제 화면에 출력
-    delay(10);
-    return;
+
   }  // mode 0 end
 
   // ───────────────────────────────────────────────────────────────
@@ -640,7 +608,11 @@ void loop() {
       currentMotorIndex = (currentMotorIndex + 1) % numMotors;
     }
 
-    float currentFrequency = calculateFrequency();
+    float currentFrequency = 0.0;  // Core 0에서 계산된 주파수 값 가져오기
+    if (xSemaphoreTake(xFrequencyMutex, portMAX_DELAY) == pdTRUE) {
+      currentFrequency = g_currentFrequency;
+      xSemaphoreGive(xFrequencyMutex);
+    }
 
     float ratio = currentFrequency / (float)motors[currentMotorIndex].maxThreshold;
     if (ratio > 1.0) {
@@ -665,7 +637,7 @@ void loop() {
     uint16_t endColor = motors[currentMotorIndex].color;
     uint16_t targetColor = RED;  // 목표점 색상
 
-    // 배경색으로 전체 영역 채우기 (하단 텍스트 영역 제외)
+    // 그래프 초기화
     sprite.fillRect(0, 0, sprite.width(), sprite.height() - 30, BLACK);
 
     int numBricks = barWidth / (brickWidth + brickSpacing);  // 가로 방향 벽돌 개수
@@ -677,11 +649,10 @@ void loop() {
       int brickY = startY;
       int currentBrickWidth = brickWidth;  // 기본 벽돌 너비
 
-      // if (i >= numBricks - filledBricks) // 좌왕!!!
+      //if (i >= numBricks - filledBricks) // 좌왕!!!
       if (i < filledBricks) {  //우왕!!
         // 채워진 벽돌에 그라데이션 적용
-        // float gradientRatio = (float)(numBricks - 1 - i) / (filledBricks > 0 ? filledBricks : 1);
-        // // 좌왕!!!
+        //float gradientRatio = (float)(numBricks - 1 - i) / (filledBricks > 0 ? filledBricks : 1); // 좌왕!!!
         float gradientRatio = (float)i / (filledBricks > 0 ? filledBricks : 1);  // 우왕!!
         uint16_t currentColor = getGradientColor(startColor, endColor, gradientRatio);
         sprite.fillRect(brickX, brickY, currentBrickWidth, barHeight, currentColor);
@@ -708,8 +679,7 @@ void loop() {
     sprite.drawString(motorStr, x, y);
 
     sprite.pushSprite(0, 0);
-    delay(5);
-  }
+  }  // mode 1 end
 
   // ─────────────────────
   //  [모드 2] 스톱워치 모드
@@ -774,7 +744,7 @@ void loop() {
         }
         previousCountdownValue = remaining;
 
-        handleScreenRotation();
+        handleScreenRotation(AXIS_Y);
 
         // 카운트다운 화면 출력
         sprite.fillScreen(BLACK);
@@ -841,10 +811,10 @@ void loop() {
     if (accY != 0)
       psi = atan2(accX, accY) * 57.295;
     if (psi > threshold && !isUpsideDown) {
-      M5.Display.setRotation(1);
+      sprite.setRotation(1);
       isUpsideDown = true;
     } else if (psi < -threshold && isUpsideDown) {
-      M5.Display.setRotation(3);
+      sprite.setRotation(3);
       isUpsideDown = false;
     }
 
@@ -912,6 +882,14 @@ void loop() {
   // ────────────────────────────────────────────
   //  [모드 3] 경과시간 시계 모드
   if (mode == 3) {
+    static unsigned long btnAPressStart = 0;
+    static bool longPressTriggered = false;
+    static unsigned long clockStartTime = 0;
+    static unsigned long pausedTime = 0;
+    static bool clockPaused = false;
+    static int lastDisplaySecond = -1;
+    static char lastTimeStr[9] = "";  // 이전 출력 문자열 캐싱
+
     if (M5.BtnA.isPressed()) {
       if (btnAPressStart == 0)
         btnAPressStart = millis();
@@ -941,46 +919,29 @@ void loop() {
     unsigned int minutes = (elapsed % 3600000UL) / 60000;
     unsigned int seconds = (elapsed % 60000UL) / 1000;
 
-    handleScreenRotation();
+    // 화면 회전 대응
+    handleScreenRotation(AXIS_Y);
 
     char timeStr[9];
     sprintf(timeStr, "%02u:%02u:%02u", hours, minutes, seconds);
 
+    // 초가 바뀔 때만 텍스트 업데이트
     if (seconds != lastDisplaySecond) {
       lastDisplaySecond = seconds;
-      int posY = (sprite.height() - 10) / 2;
-      sprite.fillRect(0, posY, sprite.width(), 20, BLACK);
-      sprite.setTextSize(4);
-      sprite.setTextColor(YELLOW, BLACK);
-      sprite.setTextDatum(MC_DATUM);
-      int centerX = sprite.width() / 2;
-      sprite.drawString(timeStr, centerX, posY);
+
+      // 중앙 시간 텍스트
+      if (strcmp(timeStr, lastTimeStr) != 0) {
+        strcpy(lastTimeStr, timeStr);
+        int posY = (sprite.height() - 10) / 2;
+        sprite.setTextSize(4);
+        sprite.setTextColor(YELLOW, BLACK);  // 배경 지정으로 자동 덮어쓰기
+        sprite.setTextDatum(MC_DATUM);
+        int centerX = sprite.width() / 2;
+        sprite.drawString(timeStr, centerX, posY);
+      }
+      sprite.pushSprite(0, 0);
     }
 
-    // 배터리 잔량 텍스트 (우측 상단)
-    float batPct = getBatteryPercent();  // 현재 배터리 잔량 백분율 계산
-    uint16_t batColor = GREEN;           // 기본 배터리 색상을 녹색으로 설정
-    if (batPct <= 10.0) {                // 배터리 잔량이 10% 이하인 경우
-      if (millis() % 2000 < 1000)        // 2초마다 1초씩
-        batColor = RED;                  // 빨간색으로 변경
-      else
-        batColor = BLACK;  // 검은색으로 변경 (깜빡임 효과)
-    }
-
-    sprite.setTextSize(2);
-    float batteryPct = getBatteryPercent();
-    int roundedBattery = round(batteryPct);                    // 배터리 잔량 반올림
-    sprite.fillRect(sprite.width() - 132, 7, 135, 20, BLACK);  // 해당 영역을 검은색으로 채워 지움
-    char formattedBattery[10];
-    sprintf(formattedBattery, "%3d%", roundedBattery);  // 배터리 잔량 문자열 포맷팅
-    sprite.setTextColor(batColor);
-    sprite.setCursor(sprite.width() - 58, 15);
-    sprite.print(formattedBattery);
-    sprite.setCursor(sprite.width() - 20, 15);
-    sprite.setTextColor(WHITE);
-    sprite.print("%");
-
-    sprite.pushSprite(0, 0);
     delay(50);
     return;
   }  // mode 3 end
@@ -1066,9 +1027,8 @@ void loop() {
   }  // mode 4 end
 
   // ────────────────────────────────────────────
-  //  [모드 6] QR모드
+  //  [모드 5] QR모드
   if (mode == 5) {
-    handleScreenRotation();
 
     bool qrDisplayed = false;  // QR 코드 한 번만 출력하도록 설정
     if (!qrDisplayed) {
@@ -1103,57 +1063,44 @@ void loop() {
     }
 
     sprite.pushSprite(0, 0);
-
   }  // mode 5 end
 
   // ────────────────────────────────────────────
-  // ???
+  //  [모드 6] 컴파일 시점의 버전정보 생성
   if (mode == 6) {
-    /*
-    // __DATE__ 예: "Apr 27 2025" → substring(7, 11)는 "2025" (연도)
-    // __DATE__ 예: "Apr 27 2025" → substring(4, 6)는 "27" (날짜)
-    // __TIME__ 예: "22:45:12" → 결합하면 "224512" (시간)
-
-    String yearStr = String(__DATE__).substring(7, 11);  // 연도 추출
-    String monthStr;
-
-    // __DATE__의 첫 3글자("Apr" 같은 월 정보)를 숫자로 변환
-    String monthMap = "JanFebMarAprMayJunJulAugSepOctNovDec";
-    int monthIndex = monthMap.indexOf(String(__DATE__).substring(0, 3)) / 3 + 1;
-    monthStr = (monthIndex < 10 ? "0" : "") + String(monthIndex);
-
-    // [컴파일 시점의 날짜와 시간을 YYMMDDhhmmss 형식으로 변환]
-    // - __DATE__ → "Apr 27 2025" 형식의 문자열 (월, 날짜, 연도 포함)
-    // - __TIME__ → "22:45:12" 형식의 문자열 (시, 분, 초 포함)
-
-    String dayStr = String(__DATE__).substring(4, 6);  // 날짜 부분 추출
-    // - __DATE__의 4~6번째 문자 추출 → "27" (예: "Apr 27 2025"에서 날짜 부분)
-    // - 이 값을 이용해 YYMMDD 형식의 'DD' 부분 설정 가능
-
-    String timeStr = String(__TIME__).substring(0, 2) +  // 시간 부분 추출
-                     String(__TIME__).substring(3, 5) +  // 분 부분 추출
-                     String(__TIME__).substring(6, 8);   // 초 부분 추출
-    // - __TIME__의 특정 위치 문자열을 결합하여 "hhmmss" 형식 생성
-    //   예) "22:45:12" → "224512"
-
-    String mpas_version = yearStr.substring(2, 4) + monthStr + dayStr + timeStr;  // YYMMDDhhmmss
-    형식
-
-    // 텍스트 설정 및 화면 중앙에 버전정보 출력
+    // 배터리 잔량 표시 (우측 상단)
+    sprite.fillScreen(BLACK);
+    float batteryvolt = M5.Power.getBatteryVoltage();
+    sprite.setTextSize(2);
     sprite.setTextColor(WHITE);
-    sprite.drawCentreString("MPAS-FE_Ver 0.1", sprite.width() / 2, sprite.height() / 2 - 15, 1.8);
-    sprite.drawCentreString("_" + mpas_version, sprite.width() / 2, sprite.height() / 2, 2.5);
+    sprite.setCursor(sprite.width() - 56, 9);
+    sprite.print(batteryvolt, 0);
 
+    sprite.setTextSize(4);
+    sprite.setCursor(10, 20);
+    sprite.print("Stuck?");
+    sprite.setTextSize(2);
+    sprite.setCursor(10, 60);
+    displayDeviceSerialNumber();
+    sprite.setCursor(10, 75);
+    displayBuildInfo();
     sprite.pushSprite(0, 0);
-    */
-      sprite.setTextSize(4);
-      sprite.setCursor(10, 20);
-      sprite.print("Stuck?");
-      sprite.setTextSize(2);
-      sprite.setCursor(10, 60);
-      displayVersionInfo();
-      sprite.pushSprite(0, 0);
 
   }  // mode 6 end
+
+  // ────────────────────────────────────────────
+  //  [모드 7] 이미지 표시 (테스트)
+  if (mode == 7) {
+    handleScreenRotation(AXIS_Z);
+    if (isUpsideDown == true) {
+      sprite.fillScreen(BLACK);
+      drawSpecificImage(&hugging_mpas);
+    } else if (isUpsideDown == false) {
+      sprite.fillScreen(BLACK);
+      drawSpecificImage(&hugging_neochamp);
+    }
+    sprite.pushSprite(0, 0);
+
+  }  // mode 7 end
 
 }  // loop end
