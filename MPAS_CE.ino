@@ -60,9 +60,9 @@ int16_t micBuffer[SAMPLES];
 ArduinoFFT<float> FFT = ArduinoFFT<float>();
 
 // [모드 0] 센서 모드 관련 변수 =================================================
-float wheelSizes[] = { 20, 22.5, 23.0, 23.5, 23.6, 23.8, 24.0, 24.2, 26.0, 31.0 };  // 단위 mm
+float wheelSizes[] = { 24.0, 26.0, 31.0 };  // 단위 mm
 int numWheelSizes = sizeof(wheelSizes) / sizeof(wheelSizes[0]);
-int currentWheelIndex = 8;
+int currentWheelIndex = 1;
 float gearRatios[] = { 5.0, 4.2, 4.0, 3.7, 3.5 };
 int numGearRatios = sizeof(gearRatios) / sizeof(gearRatios[0]);
 int currentGearIndex = 4;
